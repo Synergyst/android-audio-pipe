@@ -15,6 +15,13 @@ public class UdpAudioStreamer {
     private int serverPort;
     private int sequenceNumber = 0;
     private boolean isStreaming = false;
+    private byte[] sessionId = AudioConfig.SESSION_ID;
+
+    public void setSessionId(byte[] newSessionId) {
+        if (newSessionId != null) {
+            this.sessionId = newSessionId;
+        }
+    }
 
     public void start(String ip, int port) throws IOException {
         this.serverAddress = InetAddress.getByName(ip);
@@ -45,7 +52,7 @@ public class UdpAudioStreamer {
             // Header: type (1) + session_id (3) + sequence (4) = 8 bytes
             ByteBuffer buffer = ByteBuffer.allocate(8 + payload.length);
             buffer.put(type);
-            buffer.put(AudioConfig.SESSION_ID);
+            buffer.put(sessionId);
             buffer.putInt(sequenceNumber++);
             buffer.put(payload);
             

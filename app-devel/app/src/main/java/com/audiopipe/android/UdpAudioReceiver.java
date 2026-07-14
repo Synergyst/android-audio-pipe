@@ -14,15 +14,22 @@ public class UdpAudioReceiver implements Runnable {
     private int port;
     private boolean isListening = false;
     private AudioReceiverListener listener;
+    private byte[] currentSessionId = AudioConfig.SESSION_ID;
     
     public interface AudioReceiverListener {
         void onAudioDataReceived(byte[] data);
         void onPacketReceived(byte type, int sequence);
+        void onSessionAssigned(byte[] sessionId);
+        void onNegotiationComplete(int sampleRate);
     }
 
     public UdpAudioReceiver(int port, AudioReceiverListener listener) {
         this.port = port;
         this.listener = listener;
+    }
+
+    public void setSessionId(byte[] sessionId) {
+        this.currentSessionId = sessionId;
     }
 
     public void start() throws IOException {
@@ -52,6 +59,22 @@ public class UdpAudioReceiver implements Runnable {
         }
     }
 
+    public void sendNegotiationRequest(String ip, int port) {
+        if (socket == null) return;
+        try {
+            InetAddress address = InetAddress.getByName(ip);
+            ByteBuffer buffer = ByteBuffer.allocate(8);
+            buffer.put(AudioConfig.TYPE_NEGOTIATE);
+            buffer.put(AudioConfig.SESSION_ID);
+            buffer.putInt(0);
+            byte[] data = buffer.array();
+            DatagramPacket packet = new DatagramPacket(data, data.length, address, port);
+            socket.send(packet);
+        } catch (IOException e) {
+            Log.e(TAG, "Error sending negotiation: " + e.getMessage());
+        }
+    }
+
     @Override
     public void run() {
         byte[] incomingBuffer = new byte[AudioConfig.BUFFER_SIZE + 128];
@@ -69,16 +92,19 @@ public class UdpAudioReceiver implements Runnable {
                 byte[] session = new byte[3];
                 bb.get(session);
                 
-                boolean sessionMatch = true;
-                for (int i = 0; i < 3; i++) {
-                    if (session[i] != AudioConfig.SESSION_ID[i]) {
-                        sessionMatch = false;
-                        break;
+                // Allow Handshake response even if session doesn't match yet
+                if (type != AudioConfig.TYPE_HANDSHAKE_RESP) {
+                    boolean sessionMatch = true;
+                    for (int i = 0; i < 3; i++) {
+                        if (session[i] != currentSessionId[i]) {
+                            sessionMatch = false;
+                            break;
+                        }
                     }
-                }
-                if (!sessionMatch) {
-                    Log.v(TAG, "Ignored packet from unknown session");
-                    continue;
+                    if (!sessionMatch) {
+                        Log.v(TAG, "Ignored packet from unknown session");
+                        continue;
+                    }
                 }
 
                 int sequence = bb.getInt();
@@ -87,7 +113,20 @@ public class UdpAudioReceiver implements Runnable {
                     listener.onPacketReceived(type, sequence);
                 }
 
-                if (type == AudioConfig.TYPE_AUDIO) {
+                if (type == AudioConfig.TYPE_HANDSHAKE_RESP) {
+                    if (listener != null) {
+                        listener.onSessionAssigned(session);
+                    }
+                } else if (type == AudioConfig.TYPE_NEGOTIATE) {
+                    if (length > 12) {
+                        byte[] rateBytes = new byte[4];
+                        bb.get(rateBytes);
+                        int rate = ByteBuffer.wrap(rateBytes).getInt();
+                        if (listener != null) {
+                            listener.onNegotiationComplete(rate);
+                        }
+                    }
+                } else if (type == AudioConfig.TYPE_AUDIO) {
                     byte[] audioPayload = new byte[length - 8];
                     bb.get(audioPayload);
                     if (listener != null) {

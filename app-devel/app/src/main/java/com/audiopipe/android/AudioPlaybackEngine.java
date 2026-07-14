@@ -16,16 +16,30 @@ public class AudioPlaybackEngine implements Runnable {
     private AudioTrack audioTrack;
     private boolean isPlaying = false;
     private Thread playbackThread;
-    private final BlockingQueue<byte[]> playbackQueue = new LinkedBlockingQueue<>(100);
+    // Increased queue size for jitter buffering
+    private final BlockingQueue<byte[]> playbackQueue = new LinkedBlockingQueue<>(200);
     private final Context context;
+    private int currentSampleRate = AudioConfig.SAMPLE_RATE;
 
     public AudioPlaybackEngine(Context context) {
         this.context = context;
     }
 
     public void start() {
+        startWithRate(currentSampleRate);
+    }
+
+    public void updateSampleRate(int newRate) {
+        if (this.currentSampleRate == newRate) return;
+        Log.i(TAG, "Updating sample rate to " + newRate);
+        this.currentSampleRate = newRate;
+        stop();
+        start();
+    }
+
+    private void startWithRate(int rate) {
         int minBufferSize = AudioTrack.getMinBufferSize(
-                AudioConfig.SAMPLE_RATE,
+                rate,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioConfig.AUDIO_FORMAT
         );
@@ -39,7 +53,7 @@ public class AudioPlaybackEngine implements Runnable {
                         .build())
                 .setAudioFormat(new AudioFormat.Builder()
                         .setEncoding(AudioConfig.AUDIO_FORMAT)
-                        .setSampleRate(AudioConfig.SAMPLE_RATE)
+                        .setSampleRate(rate)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build())
                 .setBufferSizeInBytes(bufferSize)
@@ -60,11 +74,16 @@ public class AudioPlaybackEngine implements Runnable {
         playbackThread = new Thread(this, "AudioPlaybackThread");
         playbackThread.setPriority(Thread.MAX_PRIORITY);
         playbackThread.start();
-        Log.i(TAG, "Audio playback engine started in MEDIA mode.");
+        Log.i(TAG, "Audio playback engine started at " + rate + "Hz.");
     }
 
     public void playAudio(byte[] data) {
         if (!isPlaying) return;
+        // Simple jitter buffer logic: wait until queue has a few packets before starting
+        // to absorb network jitter.
+        if (playbackQueue.size() < 5) {
+            // We'll let the playback thread handle the wait
+        }
         if (!playbackQueue.offer(data)) {
             Log.w(TAG, "Playback queue overflow, dropping audio frame");
         }
@@ -92,6 +111,12 @@ public class AudioPlaybackEngine implements Runnable {
     public void run() {
         while (isPlaying) {
             try {
+                // Implement a small initial buffering delay to stabilize playback
+                if (playbackQueue.size() < 3) {
+                    Thread.sleep(10);
+                    continue;
+                }
+                
                 byte[] data = playbackQueue.take();
                 if (audioTrack != null && audioTrack.getState() == AudioTrack.STATE_INITIALIZED) {
                     audioTrack.write(data, 0, data.length);

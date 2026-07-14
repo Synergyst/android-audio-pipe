@@ -18,6 +18,7 @@
 #include <numeric>
 #include <mutex>
 #include <cmath>
+#include <random>
 
 // Configuration
 const char* PHONE_IP = "192.168.168.120"; 
@@ -35,7 +36,8 @@ enum PacketType : uint8_t {
     TYPE_PONG = 0x03,
     TYPE_STATS = 0x04,
     TYPE_HANDSHAKE_REQ = 0x05,
-    TYPE_HANDSHAKE_RESP = 0x06
+    TYPE_HANDSHAKE_RESP = 0x06,
+    TYPE_NEGOTIATE = 0x07
 };
 
 #pragma pack(push, 1)
@@ -79,7 +81,8 @@ std::atomic<bool> running(true);
 std::atomic<bool> null_mode(false);
 std::atomic<bool> test_tone_mode(false);
 ConnectionStats stats;
-uint8_t CURRENT_SESSION[3] = {0xDE, 0xAD, 0xBE};
+uint8_t CURRENT_SESSION[3] = {0x00, 0x00, 0x00};
+std::mutex session_mtx;
 
 void set_rt_priority() {
     struct sched_param param;
@@ -140,7 +143,6 @@ void outbound_thread() {
 
     while (running) {
         if (test_tone_mode) {
-            // Generate 440Hz Sine Wave
             int16_t* samples = reinterpret_cast<int16_t*>(audio_buffer.data());
             int num_samples = BUFFER_SIZE / sizeof(int16_t);
             for (int i = 0; i < num_samples; ++i) {
@@ -148,7 +150,6 @@ void outbound_thread() {
                 phase += phase_increment;
                 if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
             }
-            // Control timing for sine wave to prevent blasting the socket
             std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
         } else if (!null_mode) {
             if (pa_simple_read(s, audio_buffer.data(), BUFFER_SIZE, NULL) < 0) {
@@ -156,14 +157,16 @@ void outbound_thread() {
                 break;
             }
         } else {
-            // Null mode: silence
             memset(audio_buffer.data(), 0, BUFFER_SIZE);
             std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
         }
 
         PacketHeader header;
         header.type = TYPE_AUDIO;
-        memcpy(header.session_id, CURRENT_SESSION, 3);
+        {
+            std::lock_guard<std::mutex> lock(session_mtx);
+            memcpy(header.session_id, CURRENT_SESSION, 3);
+        }
         header.sequence = htonl(seq++);
 
         std::vector<uint8_t> packet(sizeof(PacketHeader) + BUFFER_SIZE);
@@ -217,27 +220,24 @@ void inbound_thread() {
         return;
     }
 
-    // Set a receive timeout so recvfrom doesn't block forever
     struct timeval tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 500000; // 500ms
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        std::cerr << "[Inbound] Error setting socket timeout: " << strerror(errno) << std::endl;
-    }
+    tv.tv_usec = 500000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     std::vector<uint8_t> buffer(BUFFER_SIZE + 128);
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+
     while (running) {
         struct sockaddr_in from_addr;
         socklen_t from_len = sizeof(from_addr);
         ssize_t len = recvfrom(sock, buffer.data(), buffer.size(), 0, (struct sockaddr*)&from_addr, &from_len);
         
         if (len < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                continue; // Timeout hit, check 'running' flag and try again
-            }
-            if (running) {
-                std::cerr << "[Inbound] recvfrom error: " << strerror(errno) << std::endl;
-            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            if (running) std::cerr << "[Inbound] recvfrom error: " << strerror(errno) << std::endl;
             continue;
         }
         
@@ -245,11 +245,31 @@ void inbound_thread() {
 
         PacketHeader* header = (PacketHeader*)buffer.data();
         
+        if (header->type == TYPE_HANDSHAKE_REQ) {
+            std::cout << "\n[Inbound] Handshake request from " << inet_ntoa(from_addr.sin_addr) << ". Assigning session..." << std::endl;
+            
+            PacketHeader resp;
+            resp.type = TYPE_HANDSHAKE_RESP;
+            {
+                std::lock_guard<std::mutex> lock(session_mtx);
+                CURRENT_SESSION[0] = dis(gen);
+                CURRENT_SESSION[1] = dis(gen);
+                CURRENT_SESSION[2] = dis(gen);
+                memcpy(resp.session_id, CURRENT_SESSION, 3);
+            }
+            resp.sequence = 0;
+            sendto(sock, &resp, sizeof(PacketHeader), 0, (struct sockaddr*)&from_addr, from_len);
+            continue;
+        }
+
         bool sessionMatch = true;
-        for (int i = 0; i < 3; i++) {
-            if (header->session_id[i] != CURRENT_SESSION[i]) {
-                sessionMatch = false;
-                break;
+        {
+            std::lock_guard<std::mutex> lock(session_mtx);
+            for (int i = 0; i < 3; i++) {
+                if (header->session_id[i] != CURRENT_SESSION[i]) {
+                    sessionMatch = false;
+                    break;
+                }
             }
         }
         if (!sessionMatch) continue;
@@ -274,32 +294,39 @@ void inbound_thread() {
                 size_t payload_len = len - sizeof(PacketHeader);
                 uint8_t* audio_ptr = buffer.data() + sizeof(PacketHeader);
                 
-                // Software Gain Boost
                 int16_t* samples = reinterpret_cast<int16_t*>(audio_ptr);
                 int num_samples = payload_len / sizeof(int16_t);
                 for (int i = 0; i < num_samples; ++i) {
                     float sample = samples[i] * INBOUND_GAIN;
-                    // Clamp to avoid clipping
                     if (sample > 32767.0f) sample = 32767.0f;
                     if (sample < -32768.0f) sample = -32768.0f;
                     samples[i] = static_cast<int16_t>(sample);
                 }
-                
                 pa_simple_write(s, audio_ptr, payload_len, NULL);
             }
-        } else if (header->type == TYPE_HANDSHAKE_REQ) {
-            std::cout << "\n[Inbound] Handshake requested from " << inet_ntoa(from_addr.sin_addr) << ". Sending response..." << std::endl;
-            PacketHeader resp;
-            resp.type = TYPE_HANDSHAKE_RESP;
-            memcpy(resp.session_id, CURRENT_SESSION, 3);
-            resp.sequence = 0;
-            sendto(sock, &resp, sizeof(PacketHeader), 0, (struct sockaddr*)&from_addr, from_len);
         } else if (header->type == TYPE_PING) {
             PacketHeader pong;
             pong.type = TYPE_PONG;
-            memcpy(pong.session_id, CURRENT_SESSION, 3);
+            {
+                std::lock_guard<std::mutex> lock(session_mtx);
+                memcpy(pong.session_id, CURRENT_SESSION, 3);
+            }
             pong.sequence = 0;
             sendto(sock, &pong, sizeof(PacketHeader), 0, (struct sockaddr*)&from_addr, from_len);
+        } else if (header->type == TYPE_NEGOTIATE) {
+            std::cout << "\n[Inbound] Negotiation request. Confirming 44.1kHz..." << std::endl;
+            PacketHeader resp;
+            resp.type = TYPE_NEGOTIATE;
+            {
+                std::lock_guard<std::mutex> lock(session_mtx);
+                memcpy(resp.session_id, CURRENT_SESSION, 3);
+            }
+            resp.sequence = 0;
+            uint32_t rate = htonl(SAMPLE_RATE);
+            std::vector<uint8_t> packet(sizeof(PacketHeader) + 4);
+            memcpy(packet.data(), &resp, sizeof(PacketHeader));
+            memcpy(packet.data() + sizeof(PacketHeader), &rate, 4);
+            sendto(sock, packet.data(), packet.size(), 0, (struct sockaddr*)&from_addr, from_len);
         }
     }
 

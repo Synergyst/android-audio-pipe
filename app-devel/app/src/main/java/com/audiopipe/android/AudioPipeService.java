@@ -10,6 +10,7 @@ import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 public class AudioPipeService extends Service implements AudioCaptureEngine.AudioDataListener, UdpAudioReceiver.AudioReceiverListener {
     private static final String TAG = "AudioPipeService";
@@ -34,6 +35,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
     private ServiceState currentState = ServiceState.DISCONNECTED;
     private long lastPacketSeen = 0;
+    private byte[] currentSessionId = AudioConfig.SESSION_ID;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -79,7 +81,6 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 udpReceiver.start();
                 
                 updateState(ServiceState.CONNECTING);
-                // FIX: Send handshake from the bound receiver socket, not the streamer
                 udpReceiver.sendHandshake(serverIp, serverPort);
                 
                 captureEngine = new AudioCaptureEngine(this);
@@ -137,6 +138,34 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 updateState(ServiceState.CONNECTED);
             }
         }
+    }
+
+    @Override
+    public void onSessionAssigned(byte[] sessionId) {
+        Log.i(TAG, "Session ID assigned by server: " + bytesToHex(sessionId));
+        this.currentSessionId = sessionId;
+        if (udpStreamer != null) {
+            udpStreamer.setSessionId(sessionId);
+        }
+        if (udpReceiver != null) {
+            udpReceiver.setSessionId(sessionId);
+        }
+    }
+
+    @Override
+    public void onNegotiationComplete(int sampleRate) {
+        Log.i(TAG, "Negotiated sample rate: " + sampleRate + "Hz");
+        if (playbackEngine != null) {
+            playbackEngine.updateSampleRate(sampleRate);
+        }
+    }
+
+    private String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02X", b));
+        }
+        return sb.toString();
     }
 
     private void startForegroundService() {
