@@ -15,6 +15,7 @@ public class AudioCaptureEngine implements Runnable {
     private AudioDataListener listener;
     private Thread captureThread;
     private boolean useAecNr;
+    private int currentSampleRate = AudioConfig.SAMPLE_RATE;
 
     public interface AudioDataListener {
         void onAudioDataCaptured(byte[] data, int size);
@@ -25,9 +26,32 @@ public class AudioCaptureEngine implements Runnable {
         this.useAecNr = useAecNr;
     }
 
+    public void updateSampleRate(int newRate) {
+        if (this.currentSampleRate == newRate) return;
+        Log.i(TAG, "Updating capture sample rate to " + newRate);
+        this.currentSampleRate = newRate;
+        stop();
+        try {
+            start();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to restart capture with new rate: " + e.getMessage());
+        }
+    }
+
+    public void updateAecNr(boolean enabled) {
+        Log.i(TAG, "Updating AEC/NR to " + enabled);
+        this.useAecNr = enabled;
+        stop();
+        try {
+            start();
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to restart capture with new AEC setting: " + e.getMessage());
+        }
+    }
+
     public void start() throws IOException {
         int minBufferSize = AudioRecord.getMinBufferSize(
-                AudioConfig.SAMPLE_RATE, 
+                currentSampleRate, 
                 AudioConfig.CHANNEL_CONFIG, 
                 AudioConfig.AUDIO_FORMAT
         );
@@ -36,15 +60,12 @@ public class AudioCaptureEngine implements Runnable {
             throw new IOException("Invalid audio configuration");
         }
 
-        // Use the larger of minBufferSize or our predefined buffer size
         int bufferSize = Math.max(minBufferSize, AudioConfig.BUFFER_SIZE);
-
-        // VOICE_COMMUNICATION typically enables AEC and Noise Suppression on supported devices
         int audioSource = useAecNr ? MediaRecorder.AudioSource.VOICE_COMMUNICATION : MediaRecorder.AudioSource.MIC;
 
         audioRecord = new AudioRecord(
                 audioSource,
-                AudioConfig.SAMPLE_RATE,
+                currentSampleRate,
                 AudioConfig.CHANNEL_CONFIG,
                 AudioConfig.AUDIO_FORMAT,
                 bufferSize
@@ -58,9 +79,9 @@ public class AudioCaptureEngine implements Runnable {
         audioRecord.startRecording();
         
         captureThread = new Thread(this);
-        captureThread.setPriority(Thread.MAX_PRIORITY); // High priority for audio capture
+        captureThread.setPriority(Thread.MAX_PRIORITY);
         captureThread.start();
-        Log.i(TAG, "Audio capture started (Source: " + audioSource + ", AEC/NR: " + useAecNr + ").");
+        Log.i(TAG, "Audio capture started (Rate: " + currentSampleRate + ", Source: " + audioSource + ", AEC/NR: " + useAecNr + ").");
     }
 
     public void stop() {
@@ -84,8 +105,6 @@ public class AudioCaptureEngine implements Runnable {
             try {
                 int readSize = audioRecord.read(buffer, 0, buffer.length);
                 if (readSize > 0 && listener != null) {
-                    // Use the pre-allocated buffer instead of creating a new array every time
-                    // to reduce GC pressure. The listener is responsible for immediate use or copying.
                     listener.onAudioDataCaptured(buffer, readSize);
                 }
             } catch (Exception e) {

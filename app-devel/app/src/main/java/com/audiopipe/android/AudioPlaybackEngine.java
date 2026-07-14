@@ -7,8 +7,9 @@ import android.media.AudioManager;
 import android.content.Context;
 import android.util.Log;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.PriorityQueue;
+import java.util.Comparator;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class AudioPlaybackEngine implements Runnable {
     private static final String TAG = "AudioPlaybackEngine";
@@ -16,8 +17,25 @@ public class AudioPlaybackEngine implements Runnable {
     private AudioTrack audioTrack;
     private boolean isPlaying = false;
     private Thread playbackThread;
-    // Increased queue size for jitter buffering
-    private final BlockingQueue<byte[]> playbackQueue = new LinkedBlockingQueue<>(200);
+    
+    private static class AudioPacket {
+        int sequence;
+        byte[] data;
+        AudioPacket(int sequence, byte[] data) {
+            this.sequence = sequence;
+            this.data = data;
+        }
+    }
+
+    // PriorityQueue to handle out-of-order packets
+    private final PriorityQueue<AudioPacket> packetBuffer = new PriorityQueue<>(Comparator.comparingInt(p -> p.sequence));
+    private final Object bufferLock = new Object();
+    
+    private int nextExpectedSequence = -1;
+    private int currentBufferThreshold = 5; // Initial threshold
+    private final int MIN_THRESHOLD = 3;
+    private final int MAX_THRESHOLD = 50;
+    
     private final Context context;
     private int currentSampleRate = AudioConfig.SAMPLE_RATE;
 
@@ -77,15 +95,20 @@ public class AudioPlaybackEngine implements Runnable {
         Log.i(TAG, "Audio playback engine started at " + rate + "Hz.");
     }
 
-    public void playAudio(byte[] data) {
+    public void playAudio(int sequence, byte[] data) {
         if (!isPlaying) return;
-        // Simple jitter buffer logic: wait until queue has a few packets before starting
-        // to absorb network jitter.
-        if (playbackQueue.size() < 5) {
-            // We'll let the playback thread handle the wait
-        }
-        if (!playbackQueue.offer(data)) {
-            Log.w(TAG, "Playback queue overflow, dropping audio frame");
+        
+        synchronized (bufferLock) {
+            // Drop packets that are too old
+            if (nextExpectedSequence != -1 && sequence < nextExpectedSequence) {
+                return; 
+            }
+            packetBuffer.offer(new AudioPacket(sequence, data));
+            
+            // Adaptive Buffer: If buffer grows too large, we are lagging, decrease threshold
+            if (packetBuffer.size() > MAX_THRESHOLD) {
+                currentBufferThreshold = Math.max(MIN_THRESHOLD, currentBufferThreshold - 1);
+            }
         }
     }
 
@@ -99,7 +122,10 @@ public class AudioPlaybackEngine implements Runnable {
             audioTrack.release();
             audioTrack = null;
         }
-        playbackQueue.clear();
+        synchronized (bufferLock) {
+            packetBuffer.clear();
+            nextExpectedSequence = -1;
+        }
         
         AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         audioManager.setMode(AudioManager.MODE_NORMAL);
@@ -111,15 +137,45 @@ public class AudioPlaybackEngine implements Runnable {
     public void run() {
         while (isPlaying) {
             try {
-                // Implement a small initial buffering delay to stabilize playback
-                if (playbackQueue.size() < 3) {
-                    Thread.sleep(10);
-                    continue;
-                }
+                byte[] dataToPlay = null;
                 
-                byte[] data = playbackQueue.take();
-                if (audioTrack != null && audioTrack.getState() == AudioTrack.STATE_INITIALIZED) {
-                    audioTrack.write(data, 0, data.length);
+                synchronized (bufferLock) {
+                    // Adaptive buffering: Wait until we have enough packets to smooth jitter
+                    if (packetBuffer.size() < currentBufferThreshold) {
+                        // We'll wait a bit
+                    } else {
+                        AudioPacket head = packetBuffer.peek();
+                        if (head != null) {
+                            // If this is the next expected packet, or we've waited long enough
+                            if (nextExpectedSequence == -1 || head.sequence == nextExpectedSequence) {
+                                AudioPacket p = packetBuffer.poll();
+                                dataToPlay = p.data;
+                                nextExpectedSequence = p.sequence + 1;
+                            } else if (packetBuffer.size() > MAX_THRESHOLD) {
+                                // Gap in sequence, but buffer is too full, force skip to current head
+                                AudioPacket p = packetBuffer.poll();
+                                dataToPlay = p.data;
+                                nextExpectedSequence = p.sequence + 1;
+                                Log.v(TAG, "Sequence gap detected, skipping to " + p.sequence);
+                            }
+                        }
+                    }
+                }
+
+                if (dataToPlay != null) {
+                    if (audioTrack != null && audioTrack.getState() == AudioTrack.STATE_INITIALIZED) {
+                        audioTrack.write(dataToPlay, 0, dataToPlay.length);
+                    }
+                } else {
+                    // Small sleep to avoid spinning when buffer is under threshold
+                    Thread.sleep(10);
+                    
+                    // Adaptive Buffer: If we are starving, increase threshold
+                    synchronized (bufferLock) {
+                        if (packetBuffer.isEmpty()) {
+                            currentBufferThreshold = Math.min(MAX_THRESHOLD, currentBufferThreshold + 1);
+                        }
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

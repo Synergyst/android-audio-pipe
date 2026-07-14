@@ -17,7 +17,7 @@ public class UdpAudioReceiver implements Runnable {
     private byte[] currentSessionId = AudioConfig.SESSION_ID;
     
     public interface AudioReceiverListener {
-        void onAudioDataReceived(byte[] data);
+        void onAudioDataReceived(int sequence, byte[] data);
         void onPacketReceived(byte type, int sequence);
         void onSessionAssigned(byte[] sessionId);
         void onNegotiationComplete(int sampleRate);
@@ -130,7 +130,7 @@ public class UdpAudioReceiver implements Runnable {
                     byte[] audioPayload = new byte[length - 8];
                     bb.get(audioPayload);
                     if (listener != null) {
-                        listener.onAudioDataReceived(audioPayload);
+                        listener.onAudioDataReceived(sequence, audioPayload);
                     }
                 }
             } catch (IOException e) {

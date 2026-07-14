@@ -28,10 +28,12 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private UdpAudioStreamer udpStreamer;
     private UdpAudioReceiver udpReceiver;
     private AudioPlaybackEngine playbackEngine;
+    private TcpControlServer controlServer;
     
     private String serverIp = "192.168.168.12"; 
     private int serverPort = 12345;
     private int localListenPort = 12346;
+    private int controlPort = 12347;
 
     private AudioConfig.RoutingMode routingMode = AudioConfig.RoutingMode.NORMAL;
     private boolean useAecNr = false;
@@ -92,6 +94,10 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 udpReceiver = new UdpAudioReceiver(localListenPort, this);
                 udpReceiver.start();
                 
+                // Start TCP Control Server for reliable command delivery
+                controlServer = new TcpControlServer(controlPort, this);
+                controlServer.start();
+                
                 updateState(ServiceState.CONNECTING);
                 udpReceiver.sendHandshake(serverIp, serverPort);
                 lastHandshakeSent = System.currentTimeMillis();
@@ -133,9 +139,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     }
 
     @Override
-    public void onAudioDataReceived(byte[] data) {
+    public void onAudioDataReceived(int sequence, byte[] data) {
         if (playbackEngine != null) {
-            playbackEngine.playAudio(data);
+            playbackEngine.playAudio(sequence, data);
         }
     }
 
@@ -170,6 +176,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         Log.i(TAG, "Negotiated sample rate: " + sampleRate + "Hz");
         if (playbackEngine != null) {
             playbackEngine.updateSampleRate(sampleRate);
+        }
+        if (captureEngine != null) {
+            captureEngine.updateSampleRate(sampleRate);
         }
     }
 
@@ -275,6 +284,21 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         }
     }
 
+    // Control methods for TCP server
+    public void setRoutingMode(AudioConfig.RoutingMode mode) {
+        this.routingMode = mode;
+        configureAudioRouting();
+        Log.i(TAG, "Routing mode updated via TCP: " + mode);
+    }
+
+    public void setAecNr(boolean enabled) {
+        this.useAecNr = enabled;
+        if (captureEngine != null) {
+            captureEngine.updateAecNr(enabled);
+        }
+        Log.i(TAG, "AEC/NR updated via TCP: " + enabled);
+    }
+
     @Override
     public void onDestroy() {
         Log.i(TAG, "Destroying service...");
@@ -287,6 +311,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (udpStreamer != null) udpStreamer.stop();
         if (udpReceiver != null) udpReceiver.stop();
         if (playbackEngine != null) playbackEngine.stop();
+        if (controlServer != null) controlServer.stop();
         super.onDestroy();
     }
 
