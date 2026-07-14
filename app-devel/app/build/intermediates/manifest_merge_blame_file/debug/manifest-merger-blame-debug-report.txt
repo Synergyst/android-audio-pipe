@@ -1,0 +1,113 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.audiopipe.android"
+4    android:versionCode="1"
+5    android:versionName="1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="24"
+9        android:targetSdkVersion="34" />
+10
+11    <!-- Network Permissions -->
+12    <uses-permission android:name="android.permission.INTERNET" />
+12-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:6:5-67
+12-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:6:22-64
+13    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+13-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:7:5-79
+13-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:7:22-76
+14
+15    <!-- Audio Permissions -->
+16    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+16-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:10:5-71
+16-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:10:22-68
+17    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+17-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:11:5-80
+17-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:11:22-77
+18
+19    <!-- Service Permissions for background streaming -->
+20    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+20-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:14:5-77
+20-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:14:22-74
+21    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+21-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:15:5-88
+21-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:15:22-85
+22    <uses-permission android:name="android.permission.WAKE_LOCK" />
+22-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:16:5-68
+22-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:16:22-65
+23
+24    <permission
+24-->[androidx.core:core:1.9.0] /root/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:22:5-24:47
+25        android:name="com.audiopipe.android.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+25-->[androidx.core:core:1.9.0] /root/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:23:9-81
+26        android:protectionLevel="signature" />
+26-->[androidx.core:core:1.9.0] /root/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:24:9-44
+27
+28    <uses-permission android:name="com.audiopipe.android.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+28-->[androidx.core:core:1.9.0] /root/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:26:5-97
+28-->[androidx.core:core:1.9.0] /root/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:26:22-94
+29
+30    <application
+30-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:18:5-37:19
+31        android:allowBackup="true"
+31-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:19:9-35
+32        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+32-->[androidx.core:core:1.9.0] /root/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:28:18-86
+33        android:debuggable="true"
+34        android:extractNativeLibs="false"
+35        android:label="Android Audio Pipe"
+35-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:20:9-43
+36        android:supportsRtl="true"
+36-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:21:9-35
+37        android:theme="@style/Theme.AppCompat.Light.DarkActionBar" >
+37-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:22:9-67
+38        <activity
+38-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:24:9-31:20
+39            android:name="com.audiopipe.android.MainActivity"
+39-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:25:13-41
+40            android:exported="true" >
+40-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:26:13-36
+41            <intent-filter>
+41-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:27:13-30:29
+42                <action android:name="android.intent.action.MAIN" />
+42-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:28:17-69
+42-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:28:25-66
+43
+44                <category android:name="android.intent.category.LAUNCHER" />
+44-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:29:17-77
+44-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:29:27-74
+45            </intent-filter>
+46        </activity>
+47
+48        <service
+48-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:33:9-36:40
+49            android:name="com.audiopipe.android.AudioPipeService"
+49-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:34:13-45
+50            android:exported="false"
+50-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:36:13-37
+51            android:foregroundServiceType="microphone" />
+51-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:35:13-55
+52
+53        <provider
+53-->[androidx.emoji2:emoji2:1.2.0] /root/.gradle/caches/transforms-3/d121cbb831bfcedee4bd4dacef3ca9b6/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:24:9-32:20
+54            android:name="androidx.startup.InitializationProvider"
+54-->[androidx.emoji2:emoji2:1.2.0] /root/.gradle/caches/transforms-3/d121cbb831bfcedee4bd4dacef3ca9b6/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:25:13-67
+55            android:authorities="com.audiopipe.android.androidx-startup"
+55-->[androidx.emoji2:emoji2:1.2.0] /root/.gradle/caches/transforms-3/d121cbb831bfcedee4bd4dacef3ca9b6/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:26:13-68
+56            android:exported="false" >
+56-->[androidx.emoji2:emoji2:1.2.0] /root/.gradle/caches/transforms-3/d121cbb831bfcedee4bd4dacef3ca9b6/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:27:13-37
+57            <meta-data
+57-->[androidx.emoji2:emoji2:1.2.0] /root/.gradle/caches/transforms-3/d121cbb831bfcedee4bd4dacef3ca9b6/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:29:13-31:52
+58                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+58-->[androidx.emoji2:emoji2:1.2.0] /root/.gradle/caches/transforms-3/d121cbb831bfcedee4bd4dacef3ca9b6/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:30:17-75
+59                android:value="androidx.startup" />
+59-->[androidx.emoji2:emoji2:1.2.0] /root/.gradle/caches/transforms-3/d121cbb831bfcedee4bd4dacef3ca9b6/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:31:17-49
+60            <meta-data
+60-->[androidx.lifecycle:lifecycle-process:2.4.1] /root/.gradle/caches/transforms-3/09eebfef02b068e8648c27b44a779134/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:31:13-33:52
+61                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+61-->[androidx.lifecycle:lifecycle-process:2.4.1] /root/.gradle/caches/transforms-3/09eebfef02b068e8648c27b44a779134/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:32:17-78
+62                android:value="androidx.startup" />
+62-->[androidx.lifecycle:lifecycle-process:2.4.1] /root/.gradle/caches/transforms-3/09eebfef02b068e8648c27b44a779134/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:33:17-49
+63        </provider>
+64    </application>
+65
+66</manifest>
