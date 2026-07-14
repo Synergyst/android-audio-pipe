@@ -41,6 +41,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
         if (ACTION_STOP.equals(intent.getAction())) {
             Log.i(TAG, "Stop action received. Shutting down service...");
+            updateState(ServiceState.DISCONNECTED);
             stopSelf();
             return START_NOT_STICKY;
         }

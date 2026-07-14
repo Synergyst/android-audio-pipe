@@ -34,8 +34,8 @@ public class AudioPlaybackEngine implements Runnable {
 
         audioTrack = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build())
                 .setAudioFormat(new AudioFormat.Builder()
                         .setEncoding(AudioConfig.AUDIO_FORMAT)
@@ -52,7 +52,7 @@ public class AudioPlaybackEngine implements Runnable {
         }
 
         AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-        audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+        audioManager.setMode(AudioManager.MODE_NORMAL);
 
         isPlaying = true;
         audioTrack.play();
@@ -60,7 +60,7 @@ public class AudioPlaybackEngine implements Runnable {
         playbackThread = new Thread(this, "AudioPlaybackThread");
         playbackThread.setPriority(Thread.MAX_PRIORITY);
         playbackThread.start();
-        Log.i(TAG, "Audio playback engine started in COMMUNICATION mode.");
+        Log.i(TAG, "Audio playback engine started in MEDIA mode.");
     }
 
     public void playAudio(byte[] data) {

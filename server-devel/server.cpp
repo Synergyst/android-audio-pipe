@@ -26,6 +26,7 @@ const int SEND_PORT = 12346;
 const unsigned int SAMPLE_RATE = 44100;
 const unsigned int CHANNELS = 1;
 const size_t BUFFER_SIZE = 1024;
+const float INBOUND_GAIN = 2.0f; // Boost incoming phone audio
 
 // Packet Types (Must match AudioConfig.java)
 enum PacketType : uint8_t {
@@ -148,7 +149,7 @@ void outbound_thread() {
                 if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
             }
             // Control timing for sine wave to prevent blasting the socket
-            std::this_thread::sleep_for(std::chrono::milliseconds(23)); 
+            std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
         } else if (!null_mode) {
             if (pa_simple_read(s, audio_buffer.data(), BUFFER_SIZE, NULL) < 0) {
                 std::cerr << "[Outbound] PulseAudio read error" << std::endl;
@@ -157,7 +158,7 @@ void outbound_thread() {
         } else {
             // Null mode: silence
             memset(audio_buffer.data(), 0, BUFFER_SIZE);
-            std::this_thread::sleep_for(std::chrono::milliseconds(23)); 
+            std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
         }
 
         PacketHeader header;
@@ -216,11 +217,29 @@ void inbound_thread() {
         return;
     }
 
+    // Set a receive timeout so recvfrom doesn't block forever
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 500000; // 500ms
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        std::cerr << "[Inbound] Error setting socket timeout: " << strerror(errno) << std::endl;
+    }
+
     std::vector<uint8_t> buffer(BUFFER_SIZE + 128);
     while (running) {
         struct sockaddr_in from_addr;
         socklen_t from_len = sizeof(from_addr);
         ssize_t len = recvfrom(sock, buffer.data(), buffer.size(), 0, (struct sockaddr*)&from_addr, &from_len);
+        
+        if (len < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue; // Timeout hit, check 'running' flag and try again
+            }
+            if (running) {
+                std::cerr << "[Inbound] recvfrom error: " << strerror(errno) << std::endl;
+            }
+            continue;
+        }
         
         if (len < (ssize_t)sizeof(PacketHeader)) continue;
 
@@ -253,7 +272,20 @@ void inbound_thread() {
 
             if (!null_mode && s) {
                 size_t payload_len = len - sizeof(PacketHeader);
-                pa_simple_write(s, buffer.data() + sizeof(PacketHeader), payload_len, NULL);
+                uint8_t* audio_ptr = buffer.data() + sizeof(PacketHeader);
+                
+                // Software Gain Boost
+                int16_t* samples = reinterpret_cast<int16_t*>(audio_ptr);
+                int num_samples = payload_len / sizeof(int16_t);
+                for (int i = 0; i < num_samples; ++i) {
+                    float sample = samples[i] * INBOUND_GAIN;
+                    // Clamp to avoid clipping
+                    if (sample > 32767.0f) sample = 32767.0f;
+                    if (sample < -32768.0f) sample = -32768.0f;
+                    samples[i] = static_cast<int16_t>(sample);
+                }
+                
+                pa_simple_write(s, audio_ptr, payload_len, NULL);
             }
         } else if (header->type == TYPE_HANDSHAKE_REQ) {
             std::cout << "\n[Inbound] Handshake requested from " << inet_ntoa(from_addr.sin_addr) << ". Sending response..." << std::endl;
@@ -287,7 +319,7 @@ void monitor_thread() {
                   << (diff != -1 && diff < 3000 ? "CONNECTED ✅" : "DISCONNECTED ❌") 
                   << " | Pkts: " << stats.packets_received 
                   << " | Rolling Loss: " << std::fixed << std::setprecision(2) << stats.get_rolling_loss_pct() << "%"
-                  << " | Latency: " << (diff == -1 ? "N/A" : std::to_string(diff) + "ms") << " " << std::flush;
+                  << " | Latency: " << (diff == -1 || diff >= 3000 ? "N/A" : std::to_string(diff) + "ms") << " " << std::flush;
         
         if (diff >= 3000) stats.connected = false;
 

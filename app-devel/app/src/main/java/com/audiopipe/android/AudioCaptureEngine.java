@@ -38,7 +38,7 @@ public class AudioCaptureEngine implements Runnable {
         int bufferSize = Math.max(minBufferSize, AudioConfig.BUFFER_SIZE);
 
         audioRecord = new AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 AudioConfig.SAMPLE_RATE,
                 AudioConfig.CHANNEL_CONFIG,
                 AudioConfig.AUDIO_FORMAT,
