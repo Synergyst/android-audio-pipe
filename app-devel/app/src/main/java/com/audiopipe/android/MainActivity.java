@@ -16,6 +16,9 @@ import androidx.core.app.ActivityCompat;
 import android.net.Uri;
 import android.provider.Settings;
 import android.view.View;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,9 +32,31 @@ public class MainActivity extends AppCompatActivity {
     private Button toggleButton;
     private TextView statusText;
     private Button settingsButton;
+    private Button testConnectionButton;
     
     private boolean isServiceRunning = false;
     private final ExecutorService backgroundExecutor = Executors.newSingleThreadExecutor();
+
+    private final BroadcastReceiver stateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String state = intent.getStringExtra("state");
+            runOnUiThread(() -> {
+                statusText.setText("Service State: " + state);
+                if ("CONNECTED".equals(state)) {
+                    statusText.setTextColor(Color.GREEN);
+                    toggleButton.setText("STOP STREAM");
+                    toggleButton.setBackgroundColor(Color.RED);
+                } else if ("DISCONNECTED".equals(state)) {
+                    statusText.setTextColor(Color.LTGRAY);
+                    toggleButton.setText("START STREAM");
+                    toggleButton.setBackgroundColor(Color.LTGRAY);
+                } else {
+                    statusText.setTextColor(Color.YELLOW);
+                }
+            });
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,6 +99,11 @@ public class MainActivity extends AppCompatActivity {
         portInput.setText("12345");
         root.addView(portInput);
 
+        testConnectionButton = new Button(this);
+        testConnectionButton.setText("TEST CONNECTION");
+        testConnectionButton.setOnClickListener(v -> performConnectionTest());
+        root.addView(testConnectionButton);
+
         toggleButton = new Button(this);
         toggleButton.setText("START STREAM");
         toggleButton.setEnabled(false);
@@ -100,6 +130,34 @@ public class MainActivity extends AppCompatActivity {
         root.addView(settingsButton);
 
         setContentView(root);
+    }
+
+    private void performConnectionTest() {
+        String ip = ipInput.getText().toString().trim();
+        int port = Integer.parseInt(portInput.getText().toString().trim());
+        
+        statusText.setText("Testing connection to " + ip + "...");
+        backgroundExecutor.execute(() -> {
+            try {
+                java.net.InetAddress address = java.net.InetAddress.getByName(ip);
+                boolean reachable = address.isReachable(2000);
+                
+                runOnUiThread(() -> {
+                    if (reachable) {
+                        statusText.setText("Server Reachable ✅");
+                        statusText.setTextColor(Color.GREEN);
+                    } else {
+                        statusText.setText("Server Unreachable ❌");
+                        statusText.setTextColor(Color.RED);
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    statusText.setText("Connection Test Failed: " + e.getMessage());
+                    statusText.setTextColor(Color.RED);
+                });
+            }
+        });
     }
 
     @Override
@@ -160,8 +218,7 @@ public class MainActivity extends AppCompatActivity {
             isServiceRunning = true;
             toggleButton.setText("STOP STREAM");
             toggleButton.setBackgroundColor(Color.RED);
-            statusText.setText("SERVICE ACTIVE 🚀\nTarget: " + ip + ":" + port);
-            statusText.setTextColor(Color.GREEN);
+            statusText.setText("Starting Service...");
         } catch (Exception e) {
             statusText.setText("ERROR: " + e.getMessage());
             statusText.setTextColor(Color.RED);
@@ -178,6 +235,18 @@ public class MainActivity extends AppCompatActivity {
         toggleButton.setBackgroundColor(Color.LTGRAY);
         statusText.setText("Service Stopped.");
         statusText.setTextColor(Color.LTGRAY);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        registerReceiver(stateReceiver, new IntentFilter("com.audiopipe.android.STATE_CHANGED"));
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        unregisterReceiver(stateReceiver);
     }
 
     @Override

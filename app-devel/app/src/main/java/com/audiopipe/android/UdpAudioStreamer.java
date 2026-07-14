@@ -24,14 +24,30 @@ public class UdpAudioStreamer {
         Log.i(TAG, "UDP Streamer started. Target: " + ip + ":" + port);
     }
 
+    public void sendHandshake() {
+        if (!isStreaming || socket == null) return;
+        sendPacket(AudioConfig.TYPE_HANDSHAKE_REQ, new byte[0]);
+        Log.i(TAG, "Handshake request sent.");
+    }
+
+    public void sendPing() {
+        if (!isStreaming || socket == null) return;
+        sendPacket(AudioConfig.TYPE_PING, new byte[0]);
+    }
+
     public void sendAudio(byte[] audioData) {
         if (!isStreaming || socket == null) return;
+        sendPacket(AudioConfig.TYPE_AUDIO, audioData);
+    }
 
+    private void sendPacket(byte type, byte[] payload) {
         try {
-            // Header: 4 bytes for sequence number
-            ByteBuffer buffer = ByteBuffer.allocate(4 + audioData.length);
+            // Header: type (1) + session_id (3) + sequence (4) = 8 bytes
+            ByteBuffer buffer = ByteBuffer.allocate(8 + payload.length);
+            buffer.put(type);
+            buffer.put(AudioConfig.SESSION_ID);
             buffer.putInt(sequenceNumber++);
-            buffer.put(audioData);
+            buffer.put(payload);
             
             byte[] packetData = buffer.array();
             DatagramPacket packet = new DatagramPacket(
