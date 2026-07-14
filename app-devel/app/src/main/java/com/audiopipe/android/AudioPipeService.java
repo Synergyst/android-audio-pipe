@@ -33,6 +33,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private int serverPort = 12345;
     private int localListenPort = 12346;
 
+    private AudioConfig.RoutingMode routingMode = AudioConfig.RoutingMode.NORMAL;
+    private boolean useAecNr = false;
+
     private ServiceState currentState = ServiceState.DISCONNECTED;
     private long lastPacketSeen = 0;
     private long lastHandshakeSent = 0;
@@ -63,8 +66,14 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (intent.hasExtra("SERVER_PORT")) {
             serverPort = intent.getIntExtra("SERVER_PORT", 12345);
         }
+        if (intent.hasExtra("ROUTING_MODE")) {
+            routingMode = (AudioConfig.RoutingMode) intent.getSerializableExtra("ROUTING_MODE");
+        }
+        if (intent.hasExtra("USE_AEC_NR")) {
+            useAecNr = intent.getBooleanExtra("USE_AEC_NR", false);
+        }
 
-        Log.i(TAG, "Starting Audio Pipe Service for target: " + serverIp + ":" + serverPort);
+        Log.i(TAG, "Starting Audio Pipe Service for target: " + serverIp + ":" + serverPort + " [Mode: " + routingMode + ", AEC/NR: " + useAecNr + "]");
         
         startForegroundService();
         
@@ -74,6 +83,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 RootOptimizer.optimizeSystem();
                 
                 playbackEngine = new AudioPlaybackEngine(this);
+                configureAudioRouting();
                 playbackEngine.start();
                 
                 udpStreamer = new UdpAudioStreamer();
@@ -86,7 +96,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 udpReceiver.sendHandshake(serverIp, serverPort);
                 lastHandshakeSent = System.currentTimeMillis();
                 
-                captureEngine = new AudioCaptureEngine(this);
+                captureEngine = new AudioCaptureEngine(this, useAecNr);
                 captureEngine.start();
                 
                 Log.i(TAG, "Service operational. Waiting for handshake response...");
@@ -244,9 +254,35 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         startForeground(1, notification);
     }
 
+    private void configureAudioRouting() {
+        android.media.AudioManager audioManager = (android.media.AudioManager) getSystemService(android.content.Context.AUDIO_SERVICE);
+        Log.i(TAG, "Configuring routing mode: " + routingMode);
+        
+        switch (routingMode) {
+            case SPEAKERPHONE:
+                audioManager.setMode(android.media.AudioManager.MODE_IN_COMMUNICATION);
+                audioManager.setSpeakerphoneOn(true);
+                break;
+            case EARPIECE:
+                audioManager.setMode(android.media.AudioManager.MODE_IN_COMMUNICATION);
+                audioManager.setSpeakerphoneOn(false);
+                break;
+            case NORMAL:
+            default:
+                audioManager.setMode(android.media.AudioManager.MODE_NORMAL);
+                audioManager.setSpeakerphoneOn(false);
+                break;
+        }
+    }
+
     @Override
     public void onDestroy() {
         Log.i(TAG, "Destroying service...");
+        
+        android.media.AudioManager audioManager = (android.media.AudioManager) getSystemService(android.content.Context.AUDIO_SERVICE);
+        audioManager.setMode(android.media.AudioManager.MODE_NORMAL);
+        audioManager.setSpeakerphoneOn(false);
+        
         if (captureEngine != null) captureEngine.stop();
         if (udpStreamer != null) udpStreamer.stop();
         if (udpReceiver != null) udpReceiver.stop();

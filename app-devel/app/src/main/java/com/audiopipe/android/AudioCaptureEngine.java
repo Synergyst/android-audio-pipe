@@ -14,13 +14,15 @@ public class AudioCaptureEngine implements Runnable {
     private boolean isRecording = false;
     private AudioDataListener listener;
     private Thread captureThread;
+    private boolean useAecNr;
 
     public interface AudioDataListener {
         void onAudioDataCaptured(byte[] data, int size);
     }
 
-    public AudioCaptureEngine(AudioDataListener listener) {
+    public AudioCaptureEngine(AudioDataListener listener, boolean useAecNr) {
         this.listener = listener;
+        this.useAecNr = useAecNr;
     }
 
     public void start() throws IOException {
@@ -37,8 +39,11 @@ public class AudioCaptureEngine implements Runnable {
         // Use the larger of minBufferSize or our predefined buffer size
         int bufferSize = Math.max(minBufferSize, AudioConfig.BUFFER_SIZE);
 
+        // VOICE_COMMUNICATION typically enables AEC and Noise Suppression on supported devices
+        int audioSource = useAecNr ? MediaRecorder.AudioSource.VOICE_COMMUNICATION : MediaRecorder.AudioSource.MIC;
+
         audioRecord = new AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                audioSource,
                 AudioConfig.SAMPLE_RATE,
                 AudioConfig.CHANNEL_CONFIG,
                 AudioConfig.AUDIO_FORMAT,
@@ -55,7 +60,7 @@ public class AudioCaptureEngine implements Runnable {
         captureThread = new Thread(this);
         captureThread.setPriority(Thread.MAX_PRIORITY); // High priority for audio capture
         captureThread.start();
-        Log.i(TAG, "Audio capture started.");
+        Log.i(TAG, "Audio capture started (Source: " + audioSource + ", AEC/NR: " + useAecNr + ").");
     }
 
     public void stop() {

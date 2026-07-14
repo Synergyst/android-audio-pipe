@@ -17,4 +17,15 @@ public class AudioConfig {
 
     // Session ID (Must match server.cpp)
     public static final byte[] SESSION_ID = { (byte)0xDE, (byte)0xAD, (byte)0xBE };
+
+    // Routing Modes
+    public enum RoutingMode {
+        NORMAL,         // Standard playback/capture
+        SPEAKERPHONE,   // Forced to loudspeaker
+        EARPIECE       // Forced to earpiece/headset
+    }
+
+    // Pref Keys
+    public static final String PREF_ROUTING_MODE = "pref_routing_mode";
+    public static final String PREF_AEC_NR = "pref_aec_nr";
 }

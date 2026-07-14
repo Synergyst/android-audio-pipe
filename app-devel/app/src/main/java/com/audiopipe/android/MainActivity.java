@@ -29,6 +29,8 @@ public class MainActivity extends AppCompatActivity {
 
     private EditText ipInput;
     private EditText portInput;
+    private android.widget.Spinner routingSpinner;
+    private android.widget.CheckBox aecCheckBox;
     private Button toggleButton;
     private TextView statusText;
     private Button settingsButton;
@@ -99,6 +101,28 @@ public class MainActivity extends AppCompatActivity {
         portInput.setText("12345");
         root.addView(portInput);
 
+        // --- Routing Settings Section ---
+        TextView settingsTitle = new TextView(this);
+        settingsTitle.setText("AUDIO ROUTING");
+        settingsTitle.setTextColor(Color.GREEN);
+        settingsTitle.setGravity(Gravity.CENTER);
+        settingsTitle.setPadding(0, 30, 0, 10);
+        root.addView(settingsTitle);
+
+        routingSpinner = new android.widget.Spinner(this);
+        AudioConfig.RoutingMode[] modes = AudioConfig.RoutingMode.values();
+        android.widget.ArrayAdapter<AudioConfig.RoutingMode> adapter = new android.widget.ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, modes);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        routingSpinner.setAdapter(adapter);
+        root.addView(routingSpinner);
+
+        aecCheckBox = new android.widget.CheckBox(this);
+        aecCheckBox.setText("Enable AEC/NR (Voice Comm Mode)");
+        aecCheckBox.setTextColor(Color.WHITE);
+        root.addView(aecCheckBox);
+        // ------------------------------
+
         testConnectionButton = new Button(this);
         testConnectionButton.setText("TEST CONNECTION");
         testConnectionButton.setOnClickListener(v -> performConnectionTest());
@@ -130,6 +154,7 @@ public class MainActivity extends AppCompatActivity {
         root.addView(settingsButton);
 
         setContentView(root);
+        loadPreferences();
     }
 
     private void performConnectionTest() {
@@ -167,7 +192,7 @@ public class MainActivity extends AppCompatActivity {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 performAsyncRootCheck();
             } else {
-                statusText.setText("PERMISSION DENIED\nMicrophone access is required.");
+                statusText.setText("PERMISSION DENIED\\nMicrophone access is required.");
                 statusText.setTextColor(Color.RED);
                 settingsButton.setVisibility(View.VISIBLE);
             }
@@ -202,12 +227,17 @@ public class MainActivity extends AppCompatActivity {
 
     private void startAudioPipe() {
         try {
+            savePreferences();
             String ip = ipInput.getText().toString().trim();
             int port = Integer.parseInt(portInput.getText().toString().trim());
+            AudioConfig.RoutingMode mode = (AudioConfig.RoutingMode) routingSpinner.getSelectedItem();
+            boolean useAec = aecCheckBox.isChecked();
 
             Intent intent = new Intent(this, AudioPipeService.class);
             intent.putExtra("SERVER_IP", ip);
             intent.putExtra("SERVER_PORT", port);
+            intent.putExtra("ROUTING_MODE", mode);
+            intent.putExtra("USE_AEC_NR", useAec);
             
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 startForegroundService(intent);
@@ -235,6 +265,31 @@ public class MainActivity extends AppCompatActivity {
         toggleButton.setBackgroundColor(Color.LTGRAY);
         statusText.setText("Service Stopped.");
         statusText.setTextColor(Color.LTGRAY);
+    }
+
+    private void loadPreferences() {
+        android.content.SharedPreferences prefs = getSharedPreferences("AudioPipePrefs", android.content.Context.MODE_PRIVATE);
+        
+        ipInput.setText(prefs.getString("pref_ip", "192.168.168.12"));
+        portInput.setText(prefs.getString("pref_port", "12345"));
+        
+        int modeOrdinal = prefs.getInt(AudioConfig.PREF_ROUTING_MODE, 0);
+        routingSpinner.setSelection(modeOrdinal);
+        
+        aecCheckBox.setChecked(prefs.getBoolean(AudioConfig.PREF_AEC_NR, false));
+    }
+
+    private void savePreferences() {
+        android.content.SharedPreferences.Editor editor = getSharedPreferences("AudioPipePrefs", android.content.Context.MODE_PRIVATE).edit();
+        
+        editor.putString("pref_ip", ipInput.getText().toString().trim());
+        editor.putString("pref_port", portInput.getText().toString().trim());
+        
+        AudioConfig.RoutingMode mode = (AudioConfig.RoutingMode) routingSpinner.getSelectedItem();
+        editor.putInt(AudioConfig.PREF_ROUTING_MODE, mode.ordinal());
+        
+        editor.putBoolean(AudioConfig.PREF_AEC_NR, aecCheckBox.isChecked());
+        editor.apply();
     }
 
     @Override
