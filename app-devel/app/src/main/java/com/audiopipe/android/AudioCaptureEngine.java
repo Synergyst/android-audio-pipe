@@ -38,7 +38,7 @@ public class AudioCaptureEngine implements Runnable {
         int bufferSize = Math.max(minBufferSize, AudioConfig.BUFFER_SIZE);
 
         audioRecord = new AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.MIC,
                 AudioConfig.SAMPLE_RATE,
                 AudioConfig.CHANNEL_CONFIG,
                 AudioConfig.AUDIO_FORMAT,
@@ -79,10 +79,9 @@ public class AudioCaptureEngine implements Runnable {
             try {
                 int readSize = audioRecord.read(buffer, 0, buffer.length);
                 if (readSize > 0 && listener != null) {
-                    // Pass a copy of the data to the listener to avoid race conditions
-                    byte[] dataCopy = new byte[readSize];
-                    System.arraycopy(buffer, 0, dataCopy, 0, readSize);
-                    listener.onAudioDataCaptured(dataCopy, readSize);
+                    // Use the pre-allocated buffer instead of creating a new array every time
+                    // to reduce GC pressure. The listener is responsible for immediate use or copying.
+                    listener.onAudioDataCaptured(buffer, readSize);
                 }
             } catch (Exception e) {
                 Log.e(TAG, "Error reading audio data: " + e.getMessage());

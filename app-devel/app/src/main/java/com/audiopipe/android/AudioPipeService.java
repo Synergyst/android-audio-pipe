@@ -35,6 +35,8 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
     private ServiceState currentState = ServiceState.DISCONNECTED;
     private long lastPacketSeen = 0;
+    private long lastHandshakeSent = 0;
+    private static final long HANDSHAKE_RETRY_INTERVAL = 2000; // 2 seconds
     private byte[] currentSessionId = AudioConfig.SESSION_ID;
 
     @Override
@@ -82,6 +84,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 
                 updateState(ServiceState.CONNECTING);
                 udpReceiver.sendHandshake(serverIp, serverPort);
+                lastHandshakeSent = System.currentTimeMillis();
                 
                 captureEngine = new AudioCaptureEngine(this);
                 captureEngine.start();
@@ -182,6 +185,27 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         }
 
         updateNotification();
+        
+        // Start handshake retry timer
+        new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(1000);
+                    if (currentState == ServiceState.CONNECTING) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastHandshakeSent > HANDSHAKE_RETRY_INTERVAL) {
+                            Log.i(TAG, "Handshake timeout. Retrying...");
+                            if (udpReceiver != null) {
+                                udpReceiver.sendHandshake(serverIp, serverPort);
+                                lastHandshakeSent = now;
+                            }
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        }, "HandshakeRetryThread").start();
     }
 
     private void updateNotification() {

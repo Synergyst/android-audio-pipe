@@ -12,13 +12,14 @@ echo "[2/5] Starting PulseAudio daemon..."
 if [[ "$*" == *"--null"* ]]; then
     echo "NULL MODE DETECTED: Skipping PulseAudio initialization."
 else
-    # For root, we use a specific environment variable to trick PulseAudio
-    # into thinking it's not running as root or to force the socket path.
     export PULSE_RUNTIME_PATH=/run/user/0/pulse
-    
-    # Try starting in user mode first but as root (this often works if the socket is set)
-    pulseaudio --start --exit-idle-time=-1
+
+    # Force daemon initialization directly to bypass client.conf autospawn locks
+    pulseaudio -D --exit-idle-time=-1 2>/dev/null
     sleep 2
+
+    # Force all subsequent client tools (pactl & audio_pipe_server) to target this exact socket
+    export PULSE_SERVER=unix:/run/user/0/pulse/native
 fi
 
 echo "[3/5] Verifying PulseAudio connection..."
@@ -26,14 +27,8 @@ if [[ "$*" == *"--null"* ]]; then
     echo "PulseAudio check bypassed (Null Mode)."
 else
     if ! pactl info > /dev/null 2>&1; then
-        echo "ERROR: PulseAudio failed to start. Attempting alternative..."
-        # Alternative: start manually in background
-        pulseaudio -D --exit-idle-time=-1
-        sleep 2
-        if ! pactl info > /dev/null 2>&1; then
-            echo "CRITICAL ERROR: PulseAudio is unreachable."
-            exit 1
-        fi
+        echo "CRITICAL ERROR: PulseAudio is unreachable at $PULSE_SERVER"
+        exit 1
     fi
     echo "PulseAudio is UP."
 fi

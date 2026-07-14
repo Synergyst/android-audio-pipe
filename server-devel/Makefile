@@ -1,6 +1,6 @@
 CXX = g++
-CXXFLAGS = -O3 -Wall -pthread
-LDFLAGS = -lpulse -lpulse-simple -lpthread
+CXXFLAGS = -O3 -Wall -pthread -I/root/android-audio-pipe/external/miniaudio
+LDFLAGS = -lpthread -lm -ldl
 
 TARGET = audio_pipe_server
 SRC = server.cpp

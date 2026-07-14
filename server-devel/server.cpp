@@ -1,3 +1,5 @@
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -8,8 +10,6 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <pulse/pulseaudio.h>
-#include <pulse/simple.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <iomanip>
@@ -25,11 +25,10 @@ const char* PHONE_IP = "192.168.168.120";
 const int RECV_PORT = 12345; 
 const int SEND_PORT = 12346; 
 const unsigned int SAMPLE_RATE = 44100;
-const unsigned int CHANNELS = 1;
+const unsigned int CHANNELS = 1; // Match Android App (Mono)
 const size_t BUFFER_SIZE = 1024;
-const float INBOUND_GAIN = 2.0f; // Boost incoming phone audio
+const float INBOUND_GAIN = 2.0f;
 
-// Packet Types (Must match AudioConfig.java)
 enum PacketType : uint8_t {
     TYPE_AUDIO = 0x01,
     TYPE_PING = 0x02,
@@ -55,7 +54,6 @@ struct ConnectionStats {
     std::atomic<long long> last_seen_ms{0};
     std::atomic<bool> connected{false};
     
-    // Rolling loss tracking
     std::deque<int> loss_window;
     std::mutex window_mtx;
     const size_t WINDOW_SIZE = 100;
@@ -71,9 +69,52 @@ struct ConnectionStats {
     double get_rolling_loss_pct() {
         std::lock_guard<std::mutex> lock(window_mtx);
         if (loss_window.empty()) return 0.0;
-        
         long long total_lost = std::accumulate(loss_window.begin(), loss_window.end(), 0LL);
         return (double)total_lost / (double)WINDOW_SIZE * 100.0;
+    }
+};
+
+template <typename T>
+class AudioRingBuffer {
+    std::vector<T> buffer;
+    size_t head = 0;
+    size_t tail = 0;
+    size_t size = 0;
+    std::mutex mtx;
+
+public:
+    AudioRingBuffer(size_t capacity) : buffer(capacity) {}
+
+    size_t write(const T* data, size_t count) {
+        std::lock_guard<std::mutex> lock(mtx);
+        size_t written = 0;
+        while (written < count && size < buffer.size()) {
+            buffer[head] = data[written++];
+            head = (head + 1) % buffer.size();
+            size++;
+        }
+        return written;
+    }
+
+    size_t read(T* data, size_t count) {
+        std::lock_guard<std::mutex> lock(mtx);
+        size_t read_count = 0;
+        while (read_count < count && size > 0) {
+            data[read_count++] = buffer[tail];
+            tail = (tail + 1) % buffer.size();
+            size--;
+        }
+        return read_count;
+    }
+
+    size_t available_to_read() {
+        std::lock_guard<std::mutex> lock(mtx);
+        return size;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mtx);
+        head = tail = size = 0;
     }
 };
 
@@ -84,6 +125,23 @@ ConnectionStats stats;
 uint8_t CURRENT_SESSION[3] = {0x00, 0x00, 0x00};
 std::mutex session_mtx;
 
+AudioRingBuffer<int16_t> captureBuffer(SAMPLE_RATE * 2);
+AudioRingBuffer<int16_t> playbackBuffer(SAMPLE_RATE * 2);
+
+void data_capture_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    if (null_mode) return;
+    const int16_t* input = (const int16_t*)pInput;
+    captureBuffer.write(input, frameCount * CHANNELS);
+}
+
+void playback_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    int16_t* output = (int16_t*)pOutput;
+    size_t read = playbackBuffer.read(output, frameCount * CHANNELS);
+    if (read < frameCount * CHANNELS) {
+        memset(output + read, 0, (frameCount * CHANNELS - read) * sizeof(int16_t));
+    }
+}
+
 void set_rt_priority() {
     struct sched_param param;
     param.sched_priority = 99;
@@ -92,41 +150,9 @@ void set_rt_priority() {
     }
 }
 
-void create_virtual_devices() {
-    if (null_mode) return;
-    std::cout << "[System] Creating PulseAudio virtual devices..." << std::endl;
-    system("pactl load-module module-null-sink sink_name=AndroidPipe sink_properties=device.description='AndroidAudioPipe_Speaker'");
-    system("pactl load-module module-remap-source source_name=AndroidPipeMic source_properties=device.description='AndroidAudioPipe_Mic' master=AndroidPipe.monitor");
-    std::cout << "[System] Virtual devices created." << std::endl;
-}
-
 void outbound_thread() {
     set_rt_priority();
     std::cout << "[Outbound] Thread started" << std::endl;
-
-    pa_sample_spec ss;
-    ss.format = PA_SAMPLE_S16LE;
-    ss.channels = CHANNELS;
-    ss.rate = SAMPLE_RATE;
-
-    pa_simple *s = nullptr;
-    if (!null_mode) {
-        int attempts = 0;
-        while (running && !s && attempts < 10) {
-            s = pa_simple_new(
-                "/run/user/0/pulse/native", "AndroidPipe.monitor", PA_STREAM_RECORD, NULL, NULL, &ss, NULL, NULL, NULL
-            );
-            if (!s) {
-                std::cerr << "[Outbound] Attempt " << ++attempts << "/10: Could not connect to PulseAudio source. Retrying in 1s..." << std::endl;
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-        }
-    }
-
-    if (!null_mode && !s) {
-        std::cerr << "[Outbound] Critical Error: Could not connect to PulseAudio source." << std::endl;
-        return;
-    }
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in phone_addr;
@@ -135,7 +161,7 @@ void outbound_thread() {
     phone_addr.sin_port = htons(SEND_PORT);
     inet_pton(AF_INET, PHONE_IP, &phone_addr.sin_addr);
 
-    std::vector<uint8_t> audio_buffer(BUFFER_SIZE);
+    std::vector<int16_t> audio_samples(BUFFER_SIZE / sizeof(int16_t));
     uint32_t seq = 0;
     double phase = 0.0;
     const double frequency = 440.0;
@@ -143,21 +169,20 @@ void outbound_thread() {
 
     while (running) {
         if (test_tone_mode) {
-            int16_t* samples = reinterpret_cast<int16_t*>(audio_buffer.data());
-            int num_samples = BUFFER_SIZE / sizeof(int16_t);
-            for (int i = 0; i < num_samples; ++i) {
-                samples[i] = static_cast<int16_t>(16384.0 * std::sin(phase));
+            for (auto& s : audio_samples) {
+                s = static_cast<int16_t>(16384.0 * std::sin(phase));
                 phase += phase_increment;
                 if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
         } else if (!null_mode) {
-            if (pa_simple_read(s, audio_buffer.data(), BUFFER_SIZE, NULL) < 0) {
-                std::cerr << "[Outbound] PulseAudio read error" << std::endl;
-                break;
+            if (captureBuffer.available_to_read() < audio_samples.size()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
             }
+            captureBuffer.read(audio_samples.data(), audio_samples.size());
         } else {
-            memset(audio_buffer.data(), 0, BUFFER_SIZE);
+            std::fill(audio_samples.begin(), audio_samples.end(), 0);
             std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
         }
 
@@ -169,44 +194,19 @@ void outbound_thread() {
         }
         header.sequence = htonl(seq++);
 
-        std::vector<uint8_t> packet(sizeof(PacketHeader) + BUFFER_SIZE);
+        std::vector<uint8_t> packet(sizeof(PacketHeader) + audio_samples.size() * sizeof(int16_t));
         memcpy(packet.data(), &header, sizeof(PacketHeader));
-        memcpy(packet.data() + sizeof(PacketHeader), audio_buffer.data(), BUFFER_SIZE);
+        memcpy(packet.data() + sizeof(PacketHeader), audio_samples.data(), audio_samples.size() * sizeof(int16_t));
 
         sendto(sock, packet.data(), packet.size(), 0, (struct sockaddr*)&phone_addr, sizeof(phone_addr));
     }
 
-    if (s) pa_simple_free(s);
     close(sock);
 }
 
 void inbound_thread() {
     set_rt_priority();
     std::cout << "[Inbound] Thread started" << std::endl;
-
-    pa_sample_spec ss;
-    ss.format = PA_SAMPLE_S16LE;
-    ss.channels = CHANNELS;
-    ss.rate = SAMPLE_RATE;
-
-    pa_simple *s = nullptr;
-    if (!null_mode) {
-        int attempts = 0;
-        while (running && !s && attempts < 10) {
-            s = pa_simple_new(
-                "/run/user/0/pulse/native", "AndroidPipe", PA_STREAM_PLAYBACK, NULL, NULL, &ss, NULL, NULL, NULL
-            );
-            if (!s) {
-                std::cerr << "[Inbound] Attempt " << ++attempts << "/10: Could not connect to PulseAudio sink. Retrying in 1s..." << std::endl;
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-        }
-    }
-
-    if (!null_mode && !s) {
-        std::cerr << "[Inbound] Critical Error: Could not connect to PulseAudio sink." << std::endl;
-        return;
-    }
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in my_addr;
@@ -243,11 +243,11 @@ void inbound_thread() {
         
         if (len < (ssize_t)sizeof(PacketHeader)) continue;
 
-        PacketHeader* header = (PacketHeader*)buffer.data();
+        PacketHeader header;
+        std::memcpy(&header, buffer.data(), sizeof(PacketHeader));
         
-        if (header->type == TYPE_HANDSHAKE_REQ) {
+        if (header.type == TYPE_HANDSHAKE_REQ) {
             std::cout << "\n[Inbound] Handshake request from " << inet_ntoa(from_addr.sin_addr) << ". Assigning session..." << std::endl;
-            
             PacketHeader resp;
             resp.type = TYPE_HANDSHAKE_RESP;
             {
@@ -266,7 +266,7 @@ void inbound_thread() {
         {
             std::lock_guard<std::mutex> lock(session_mtx);
             for (int i = 0; i < 3; i++) {
-                if (header->session_id[i] != CURRENT_SESSION[i]) {
+                if (header.session_id[i] != CURRENT_SESSION[i]) {
                     sessionMatch = false;
                     break;
                 }
@@ -279,8 +279,8 @@ void inbound_thread() {
         stats.last_seen_ms = now_ms;
         stats.connected = true;
 
-        if (header->type == TYPE_AUDIO) {
-            uint32_t seq = ntohl(header->sequence);
+        if (header.type == TYPE_AUDIO) {
+            uint32_t seq = ntohl(header.sequence);
             int lost = 0;
             if (stats.last_sequence > 0 && seq > stats.last_sequence + 1) {
                 lost = seq - stats.last_sequence - 1;
@@ -290,21 +290,21 @@ void inbound_thread() {
             stats.packets_received++;
             stats.record_loss(lost);
 
-            if (!null_mode && s) {
+            if (!null_mode) {
                 size_t payload_len = len - sizeof(PacketHeader);
                 uint8_t* audio_ptr = buffer.data() + sizeof(PacketHeader);
-                
                 int16_t* samples = reinterpret_cast<int16_t*>(audio_ptr);
                 int num_samples = payload_len / sizeof(int16_t);
+                
                 for (int i = 0; i < num_samples; ++i) {
                     float sample = samples[i] * INBOUND_GAIN;
                     if (sample > 32767.0f) sample = 32767.0f;
                     if (sample < -32768.0f) sample = -32768.0f;
                     samples[i] = static_cast<int16_t>(sample);
                 }
-                pa_simple_write(s, audio_ptr, payload_len, NULL);
+                playbackBuffer.write(samples, num_samples);
             }
-        } else if (header->type == TYPE_PING) {
+        } else if (header.type == TYPE_PING) {
             PacketHeader pong;
             pong.type = TYPE_PONG;
             {
@@ -313,7 +313,7 @@ void inbound_thread() {
             }
             pong.sequence = 0;
             sendto(sock, &pong, sizeof(PacketHeader), 0, (struct sockaddr*)&from_addr, from_len);
-        } else if (header->type == TYPE_NEGOTIATE) {
+        } else if (header.type == TYPE_NEGOTIATE) {
             std::cout << "\n[Inbound] Negotiation request. Confirming 44.1kHz..." << std::endl;
             PacketHeader resp;
             resp.type = TYPE_NEGOTIATE;
@@ -330,7 +330,6 @@ void inbound_thread() {
         }
     }
 
-    if (s) pa_simple_free(s);
     close(sock);
 }
 
@@ -338,7 +337,6 @@ void monitor_thread() {
     while (running) {
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        
         long long last_seen = stats.last_seen_ms;
         long long diff = (last_seen == 0) ? -1 : (now_ms - last_seen);
         
@@ -349,7 +347,6 @@ void monitor_thread() {
                   << " | Latency: " << (diff == -1 || diff >= 3000 ? "N/A" : std::to_string(diff) + "ms") << " " << std::flush;
         
         if (diff >= 3000) stats.connected = false;
-
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     std::cout << std::endl;
@@ -361,15 +358,41 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]) == "--test-tone") test_tone_mode = true;
     }
 
-    if (null_mode) std::cout << "!!! RUNNING IN NULL-AUDIO MODE (Bypassing PulseAudio) !!!" << std::endl;
+    if (null_mode) std::cout << "!!! RUNNING IN NULL-AUDIO MODE (Bypassing Audio Hardware) !!!" << std::endl;
     if (test_tone_mode) std::cout << "!!! TEST TONE MODE ACTIVE: Generating 440Hz Sine Wave !!!" << std::endl;
 
-    std::cout << "--- High-Performance Audio Pipe (PulseAudio Edition) ---" << std::endl;
+    std::cout << "--- High-Performance Audio Pipe (Miniaudio Edition) ---" << std::endl;
     
-    create_virtual_devices();
+    ma_device_config captureConfig = ma_device_config_init(ma_device_type_capture);
+    captureConfig.capture.format = ma_format_s16;
+    captureConfig.capture.channels = CHANNELS;
+    captureConfig.sampleRate = SAMPLE_RATE;
+    captureConfig.dataCallback = data_capture_callback;
 
-    std::cout << "PC Capture: AndroidPipe.monitor -> Phone: " << PHONE_IP << ":" << SEND_PORT << std::endl;
-    std::cout << "Phone: " << RECV_PORT << " -> PC Playback: AndroidPipe" << std::endl;
+    ma_device captureDevice;
+    if (ma_device_init(NULL, &captureConfig, &captureDevice) != MA_SUCCESS) {
+        std::cerr << "Failed to initialize capture device" << std::endl;
+        if (!null_mode) return 1;
+    } else {
+        ma_device_start(&captureDevice);
+    }
+
+    ma_device_config playbackConfig = ma_device_config_init(ma_device_type_playback);
+    playbackConfig.playback.format = ma_format_s16;
+    playbackConfig.playback.channels = CHANNELS;
+    playbackConfig.sampleRate = SAMPLE_RATE;
+    playbackConfig.dataCallback = playback_callback;
+
+    ma_device playbackDevice;
+    if (ma_device_init(NULL, &playbackConfig, &playbackDevice) != MA_SUCCESS) {
+        std::cerr << "Failed to initialize playback device" << std::endl;
+        if (!null_mode) return 1;
+    } else {
+        ma_device_start(&playbackDevice);
+    }
+
+    std::cout << "PC Capture: Default Device -> Phone: " << PHONE_IP << ":" << SEND_PORT << std::endl;
+    std::cout << "Phone: " << RECV_PORT << " -> PC Playback: Default Device" << std::endl;
 
     std::thread t_out(outbound_thread);
     std::thread t_in(inbound_thread);
@@ -383,10 +406,8 @@ int main(int argc, char** argv) {
     t_in.join();
     t_mon.join();
 
-    if (!null_mode) {
-        system("pactl unload-module module-null-sink");
-        system("pactl unload-module module-remap-source");
-    }
+    ma_device_uninit(&captureDevice);
+    ma_device_uninit(&playbackDevice);
 
     return 0;
 }
