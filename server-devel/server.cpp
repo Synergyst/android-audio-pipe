@@ -30,11 +30,23 @@ const unsigned int CHANNELS = 1; // Match Android App (Mono)
 const size_t BUFFER_SIZE = 1024;
 const float INBOUND_GAIN = 2.0f;
 
+enum class RunMode {
+    MIC,      // Phone -> PC (Phone acts as Mic)
+    SPEAKER,  // PC -> Phone (Phone acts as Speaker)
+    DUPLEX    // Both
+};
+RunMode current_mode = RunMode::DUPLEX;
+
 // Virtual Device Names for PulseAudio
-const char* VIRTUAL_SINK_NAME = "AndroidPipe";
-const char* VIRTUAL_SOURCE_NAME = "AndroidPipeMic";
-const char* VIRTUAL_SINK_DESC = "AndroidAudioPipe_Speaker";
-const char* VIRTUAL_SOURCE_DESC = "AndroidAudioPipe_Mic";
+const char* MIC_SINK_NAME = "AndroidPipe_MicSink";
+const char* MIC_SOURCE_NAME = "AndroidPipe_Mic";
+const char* MIC_SINK_DESC = "Android_Mic_Internal";
+const char* MIC_SOURCE_DESC = "Android_Phone_Microphone";
+
+const char* SPEAKER_SINK_NAME = "AndroidPipe_Speaker";
+const char* SPEAKER_SOURCE_NAME = "AndroidPipe_SpeakerMonitor";
+const char* SPEAKER_SINK_DESC = "Android_Phone_Speaker";
+const char* SPEAKER_SOURCE_DESC = "Android_Speaker_Internal";
 
 enum PacketType : uint8_t {
     TYPE_AUDIO = 0x01,
@@ -360,44 +372,69 @@ void monitor_thread() {
 }
 
 void setup_virtual_devices() {
-    std::cout << "[System] Provisioning virtual audio devices..." << std::endl;
+    std::cout << "[System] Provisioning isolated virtual audio devices..." << std::endl;
     
-    // 1. Ensure PulseAudio is running
     if (system("pgrep pulseaudio > /dev/null") != 0) {
         std::cout << "[System] PulseAudio not detected. Attempting to start..." << std::endl;
         system("pulseaudio -D --exit-idle-time=-1 2>/dev/null");
         sleep(2);
     }
 
-    // 2. Create Virtual Sink
-    std::cout << "[System] Creating virtual sink: " << VIRTUAL_SINK_NAME << std::endl;
-    std::string sink_cmd = "pactl load-module module-null-sink sink_name=" + std::string(VIRTUAL_SINK_NAME) + " sink_properties=device.description='" + std::string(VIRTUAL_SINK_DESC) + "'";
-    system(sink_cmd.c_str());
+    if (current_mode == RunMode::MIC || current_mode == RunMode::DUPLEX) {
+        std::cout << "[System] Creating Mic path: " << MIC_SOURCE_NAME << std::endl;
+        std::string sink_cmd = "pactl load-module module-null-sink sink_name=" + std::string(MIC_SINK_NAME) + " sink_properties=device.description='" + std::string(MIC_SINK_DESC) + "'";
+        system(sink_cmd.c_str());
+        std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(MIC_SOURCE_NAME) + " source_properties=device.description='" + std::string(MIC_SOURCE_DESC) + "' master=" + std::string(MIC_SINK_NAME) + ".monitor";
+        system(source_cmd.c_str());
+    }
 
-    // 3. Create Virtual Source (remap from sink monitor)
-    std::cout << "[System] Creating virtual source: " << VIRTUAL_SOURCE_NAME << std::endl;
-    std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(VIRTUAL_SOURCE_NAME) + " source_properties=device.description='" + std::string(VIRTUAL_SOURCE_DESC) + "' master=" + std::string(VIRTUAL_SINK_NAME) + ".monitor";
-    system(source_cmd.c_str());
+    if (current_mode == RunMode::SPEAKER || current_mode == RunMode::DUPLEX) {
+        std::cout << "[System] Creating Speaker path: " << SPEAKER_SINK_NAME << std::endl;
+        std::string sink_cmd = "pactl load-module module-null-sink sink_name=" + std::string(SPEAKER_SINK_NAME) + " sink_properties=device.description='" + std::string(SPEAKER_SINK_DESC) + "'";
+        system(sink_cmd.c_str());
+        std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(SPEAKER_SOURCE_NAME) + " source_properties=device.description='" + std::string(SPEAKER_SOURCE_DESC) + "' master=" + std::string(SPEAKER_SINK_NAME) + ".monitor";
+        system(source_cmd.c_str());
+    }
 }
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--null") null_mode = true;
-        if (std::string(argv[i]) == "--test-tone") test_tone_mode = true;
+        std::string arg = argv[i];
+        if (arg == "--null") null_mode = true;
+        if (arg == "--test-tone") test_tone_mode = true;
+        if (arg == "--mode") {
+            if (i + 1 < argc) {
+                std::string m = argv[++i];
+                if (m == "mic") current_mode = RunMode::MIC;
+                else if (m == "speaker") current_mode = RunMode::SPEAKER;
+                else if (m == "duplex") current_mode = RunMode::DUPLEX;
+                else std::cerr << "Unknown mode: " << m << ". Using duplex." << std::endl;
+            }
+        }
     }
 
     if (null_mode) std::cout << "!!! RUNNING IN NULL-AUDIO MODE (Bypassing Audio Hardware) !!!" << std::endl;
     if (test_tone_mode) std::cout << "!!! TEST TONE MODE ACTIVE: Generating 440Hz Sine Wave !!!" << std::endl;
 
-    std::cout << "--- High-Performance Audio Pipe (Miniaudio Edition) ---" << std::endl;
+    std::cout << "--- High-Performance Audio Pipe (Miniaudio Edition) ---\n";
     
     if (!null_mode) {
         setup_virtual_devices();
         
-        // Force PulseAudio to use our virtual devices for this process
-        setenv("PULSE_SINK", VIRTUAL_SINK_NAME, 1);
-        setenv("PULSE_SOURCE", VIRTUAL_SOURCE_NAME, 1);
-        std::cout << "[System] Environment set: SINK=" << VIRTUAL_SINK_NAME << ", SOURCE=" << VIRTUAL_SOURCE_NAME << std::endl;
+        if (current_mode == RunMode::MIC) {
+            setenv("PULSE_SINK", MIC_SINK_NAME, 1);
+            std::string src = std::string(MIC_SINK_NAME) + ".monitor";
+            setenv("PULSE_SOURCE", src.c_str(), 1);
+        } else if (current_mode == RunMode::SPEAKER) {
+            setenv("PULSE_SINK", SPEAKER_SINK_NAME, 1);
+            std::string src = std::string(SPEAKER_SINK_NAME) + ".monitor";
+            setenv("PULSE_SOURCE", src.c_str(), 1);
+        } else {
+            setenv("PULSE_SINK", MIC_SINK_NAME, 1); 
+            std::string src = std::string(SPEAKER_SINK_NAME) + ".monitor";
+            setenv("PULSE_SOURCE", src.c_str(), 1);
+        }
+        std::cout << "[System] Mode: " << (current_mode == RunMode::MIC ? "MIC" : current_mode == RunMode::SPEAKER ? "SPEAKER" : "DUPLEX") << std::endl;
     }
 
     ma_device_config captureConfig = ma_device_config_init(ma_device_type_capture);
@@ -407,11 +444,17 @@ int main(int argc, char** argv) {
     captureConfig.dataCallback = data_capture_callback;
 
     ma_device captureDevice;
-    if (ma_device_init(NULL, &captureConfig, &captureDevice) != MA_SUCCESS) {
-        std::cerr << "Failed to initialize capture device" << std::endl;
-        if (!null_mode) return 1;
+    bool capture_started = false;
+    if (current_mode != RunMode::MIC && !null_mode) {
+        if (ma_device_init(NULL, &captureConfig, &captureDevice) == MA_SUCCESS) {
+            ma_device_start(&captureDevice);
+            capture_started = true;
+        } else {
+            std::cerr << "Failed to initialize capture device" << std::endl;
+            return 1;
+        }
     } else {
-        ma_device_start(&captureDevice);
+        std::cout << "[System] Capture disabled (Mode: " << (current_mode == RunMode::MIC ? "MIC" : "NULL") << ")." << std::endl;
     }
 
     ma_device_config playbackConfig = ma_device_config_init(ma_device_type_playback);
@@ -421,15 +464,21 @@ int main(int argc, char** argv) {
     playbackConfig.dataCallback = playback_callback;
 
     ma_device playbackDevice;
-    if (ma_device_init(NULL, &playbackConfig, &playbackDevice) != MA_SUCCESS) {
-        std::cerr << "Failed to initialize playback device" << std::endl;
-        if (!null_mode) return 1;
+    bool playback_started = false;
+    if (current_mode != RunMode::SPEAKER && !null_mode) {
+        if (ma_device_init(NULL, &playbackConfig, &playbackDevice) == MA_SUCCESS) {
+            ma_device_start(&playbackDevice);
+            playback_started = true;
+        } else {
+            std::cerr << "Failed to initialize playback device" << std::endl;
+            return 1;
+        }
     } else {
-        ma_device_start(&playbackDevice);
+        std::cout << "[System] Playback disabled (Mode: " << (current_mode == RunMode::SPEAKER ? "SPEAKER" : "NULL") << ")." << std::endl;
     }
 
-    std::cout << "PC Capture: " << (null_mode ? "NULL" : VIRTUAL_SOURCE_NAME) << " -> Phone: " << PHONE_IP << ":" << SEND_PORT << std::endl;
-    std::cout << "Phone: " << RECV_PORT << " -> PC Playback: " << (null_mode ? "NULL" : VIRTUAL_SINK_NAME) << std::endl;
+    std::cout << "PC Capture (to Phone): " << (null_mode ? "NULL" : SPEAKER_SOURCE_NAME) << " -> " << PHONE_IP << ":" << SEND_PORT << std::endl;
+    std::cout << "Phone (to PC): " << RECV_PORT << " -> PC Playback: " << (null_mode ? "NULL" : MIC_SINK_NAME) << std::endl;
 
     std::thread t_out(outbound_thread);
     std::thread t_in(inbound_thread);
@@ -443,8 +492,8 @@ int main(int argc, char** argv) {
     t_in.join();
     t_mon.join();
 
-    ma_device_uninit(&captureDevice);
-    ma_device_uninit(&playbackDevice);
+    if (capture_started) ma_device_uninit(&captureDevice);
+    if (playback_started) ma_device_uninit(&playbackDevice);
 
     return 0;
 }
