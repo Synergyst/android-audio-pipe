@@ -42,6 +42,8 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private long lastPacketSeen = 0;
     private long lastHandshakeSent = 0;
     private static final long HANDSHAKE_RETRY_INTERVAL = 2000; // 2 seconds
+    private static final long CONNECTION_TIMEOUT_MS = 5000; // 5 seconds
+    private static final long RECONNECT_INTERVAL_MS = 5000; // 5 seconds
     private byte[] currentSessionId = AudioConfig.SESSION_ID;
 
     @Override
@@ -100,6 +102,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 
                 updateState(ServiceState.CONNECTING);
                 udpReceiver.sendHandshake(serverIp, serverPort);
+                udpReceiver.sendNegotiationRequest(serverIp, serverPort);
                 lastHandshakeSent = System.currentTimeMillis();
                 
                 captureEngine = new AudioCaptureEngine(this, useAecNr);
@@ -165,7 +168,10 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         this.currentSessionId = sessionId;
         if (udpStreamer != null) {
             udpStreamer.setSessionId(sessionId);
+                if (playbackEngine != null) {
+            playbackEngine.resetSequence();
         }
+    }
         if (udpReceiver != null) {
             udpReceiver.setSessionId(sessionId);
         }
@@ -205,26 +211,38 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
         updateNotification();
         
-        // Start handshake retry timer
+        // Start connection monitor and retry timer
         new Thread(() -> {
             while (true) {
                 try {
                     Thread.sleep(1000);
-                    if (currentState == ServiceState.CONNECTING) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastHandshakeSent > HANDSHAKE_RETRY_INTERVAL) {
-                            Log.i(TAG, "Handshake timeout. Retrying...");
+                    long now = System.currentTimeMillis();
+
+                    // 1. Handle Initial Connection / Reconnection attempts
+                    if (currentState == ServiceState.CONNECTING || currentState == ServiceState.CONNECTION_LOST) {
+                        long interval = (currentState == ServiceState.CONNECTING) ? HANDSHAKE_RETRY_INTERVAL : RECONNECT_INTERVAL_MS;
+                        if (now - lastHandshakeSent > interval) {
+                            Log.i(TAG, "Attempting connection/reconnection...");
                             if (udpReceiver != null) {
                                 udpReceiver.sendHandshake(serverIp, serverPort);
+                                udpReceiver.sendNegotiationRequest(serverIp, serverPort);
                                 lastHandshakeSent = now;
                             }
+                        }
+                    }
+
+                    // 2. Monitor for Connection Loss (Heartbeat)
+                    if (currentState == ServiceState.CONNECTED) {
+                        if (now - lastPacketSeen > CONNECTION_TIMEOUT_MS) {
+                            Log.w(TAG, "No packets received for " + CONNECTION_TIMEOUT_MS + "ms. Connection lost!");
+                            updateState(ServiceState.CONNECTION_LOST);
                         }
                     }
                 } catch (InterruptedException e) {
                     break;
                 }
             }
-        }, "HandshakeRetryThread").start();
+        }, "ConnectionMonitorThread").start();
     }
 
     private void updateNotification() {

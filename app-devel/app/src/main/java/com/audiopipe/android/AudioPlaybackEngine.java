@@ -112,6 +112,14 @@ public class AudioPlaybackEngine implements Runnable {
         }
     }
 
+    public void resetSequence() {
+        synchronized (bufferLock) {
+            packetBuffer.clear();
+            nextExpectedSequence = -1;
+            Log.i(TAG, "Playback sequence reset for new session.");
+        }
+    }
+
     public void stop() {
         isPlaying = false;
         if (playbackThread != null) {

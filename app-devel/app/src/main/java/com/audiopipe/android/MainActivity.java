@@ -213,6 +213,11 @@ public class MainActivity extends AppCompatActivity {
                     statusText.setTextColor(Color.YELLOW);
                     toggleButton.setEnabled(true);
                 }
+                
+                // Auto-connect if not already running
+                if (!isServiceRunning) {
+                    startAudioPipe();
+                }
             });
         });
     }

@@ -13,7 +13,14 @@ if [[ "$*" == *"--null"* ]]; then
 else
     export PULSE_RUNTIME_PATH=/run/user/0/pulse
     pulseaudio -D --exit-idle-time=-1 2>/dev/null
-    sleep 2
+    
+    # Wait for the native socket to actually appear on disk
+    MAX_RETRIES=10
+    COUNT=0
+    while [ ! -S /run/user/0/pulse/native ] && [ $COUNT -lt $MAX_RETRIES ]; do
+        sleep 0.5
+        ((COUNT++))
+    done
     export PULSE_SERVER=unix:/run/user/0/pulse/native
 fi
 

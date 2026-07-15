@@ -118,7 +118,7 @@ public class UdpAudioReceiver implements Runnable {
                         listener.onSessionAssigned(session);
                     }
                 } else if (type == AudioConfig.TYPE_NEGOTIATE) {
-                    if (length > 12) {
+                    if (length >= 12) {
                         byte[] rateBytes = new byte[4];
                         bb.get(rateBytes);
                         int rate = ByteBuffer.wrap(rateBytes).getInt();
