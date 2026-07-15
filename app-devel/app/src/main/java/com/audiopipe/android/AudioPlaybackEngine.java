@@ -35,6 +35,8 @@ public class AudioPlaybackEngine implements Runnable {
     private int currentBufferThreshold = 5; // Initial threshold
     private final int MIN_THRESHOLD = 3;
     private final int MAX_THRESHOLD = 50;
+    private final int TARGET_BUFFER_SIZE = 10;
+    private final int DRIFT_UPPER_BOUND = 25; // Drop packets if we exceed this to correct clock drift
     
     private final Context context;
     private int currentSampleRate = AudioConfig.SAMPLE_RATE;
@@ -66,7 +68,7 @@ public class AudioPlaybackEngine implements Runnable {
 
         audioTrack = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build())
                 .setAudioFormat(new AudioFormat.Builder()
@@ -103,6 +105,18 @@ public class AudioPlaybackEngine implements Runnable {
             if (nextExpectedSequence != -1 && sequence < nextExpectedSequence) {
                 return; 
             }
+
+            // Clock Drift Correction: If the buffer is consistently too large, 
+            // we are receiving data faster than we are playing it.
+            // Drop the oldest packet to catch up and reduce latency.
+            if (packetBuffer.size() > DRIFT_UPPER_BOUND) {
+                AudioPacket dropped = packetBuffer.poll();
+                if (dropped != null) {
+                    nextExpectedSequence = dropped.sequence + 1;
+                    Log.v(TAG, "Clock drift detected: dropping packet " + dropped.sequence + " to catch up. Buffer size: " + packetBuffer.size());
+                }
+            }
+
             packetBuffer.offer(new AudioPacket(sequence, data));
             
             // Adaptive Buffer: If buffer grows too large, we are lagging, decrease threshold
