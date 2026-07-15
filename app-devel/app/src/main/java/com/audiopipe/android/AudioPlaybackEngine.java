@@ -97,7 +97,7 @@ public class AudioPlaybackEngine implements Runnable {
         Log.i(TAG, "Audio playback engine started at " + rate + "Hz.");
     }
 
-    public void playAudio(int sequence, byte[] data) {
+    public void playAudio(int sequence, byte[] data, byte[] redundantData) {
         if (!isPlaying) return;
         
         synchronized (bufferLock) {
@@ -106,9 +106,14 @@ public class AudioPlaybackEngine implements Runnable {
                 return; 
             }
 
-            // Clock Drift Correction: If the buffer is consistently too large, 
-            // we are receiving data faster than we are playing it.
-            // Drop the oldest packet to catch up and reduce latency.
+            // FEC: If we have redundant data and we're missing the previous packet, fill it in
+            if (redundantData != null && nextExpectedSequence != -1 && sequence == nextExpectedSequence + 1) {
+                AudioPacket missingPacket = new AudioPacket(nextExpectedSequence, redundantData);
+                packetBuffer.offer(missingPacket);
+                Log.v(TAG, "FEC: Recovered missing packet " + nextExpectedSequence);
+            }
+
+            // Clock Drift Correction
             if (packetBuffer.size() > DRIFT_UPPER_BOUND) {
                 AudioPacket dropped = packetBuffer.poll();
                 if (dropped != null) {
@@ -119,10 +124,11 @@ public class AudioPlaybackEngine implements Runnable {
 
             packetBuffer.offer(new AudioPacket(sequence, data));
             
-            // Adaptive Buffer: If buffer grows too large, we are lagging, decrease threshold
             if (packetBuffer.size() > MAX_THRESHOLD) {
                 currentBufferThreshold = Math.max(MIN_THRESHOLD, currentBufferThreshold - 1);
             }
+            
+            bufferLock.notifyAll();
         }
     }
 
@@ -162,19 +168,16 @@ public class AudioPlaybackEngine implements Runnable {
                 byte[] dataToPlay = null;
                 
                 synchronized (bufferLock) {
-                    // Adaptive buffering: Wait until we have enough packets to smooth jitter
                     if (packetBuffer.size() < currentBufferThreshold) {
-                        // We'll wait a bit
+                        bufferLock.wait(10);
                     } else {
                         AudioPacket head = packetBuffer.peek();
                         if (head != null) {
-                            // If this is the next expected packet, or we've waited long enough
                             if (nextExpectedSequence == -1 || head.sequence == nextExpectedSequence) {
                                 AudioPacket p = packetBuffer.poll();
                                 dataToPlay = p.data;
                                 nextExpectedSequence = p.sequence + 1;
                             } else if (packetBuffer.size() > MAX_THRESHOLD) {
-                                // Gap in sequence, but buffer is too full, force skip to current head
                                 AudioPacket p = packetBuffer.poll();
                                 dataToPlay = p.data;
                                 nextExpectedSequence = p.sequence + 1;
@@ -189,9 +192,6 @@ public class AudioPlaybackEngine implements Runnable {
                         audioTrack.write(dataToPlay, 0, dataToPlay.length);
                     }
                 } else {
-                    // Small sleep to avoid spinning when buffer is under threshold
-                    Thread.sleep(10);
-                    
                     // Adaptive Buffer: If we are starving, increase threshold
                     synchronized (bufferLock) {
                         if (packetBuffer.isEmpty()) {

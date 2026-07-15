@@ -1,6 +1,9 @@
 #!/bin/bash
 # Start Audio Stack Script
 
+# Prevent X11/XCB timeouts by unsetting DISPLAY for this process and its children
+unset DISPLAY
+
 echo "[1/5] Killing existing PulseAudio instances..."
 killall -9 pulseaudio 2>/dev/null
 

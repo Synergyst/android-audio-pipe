@@ -16,6 +16,7 @@ public class UdpAudioStreamer {
     private int sequenceNumber = 0;
     private boolean isStreaming = false;
     private byte[] sessionId = AudioConfig.SESSION_ID;
+    private byte[] lastPayload = null;
 
     public void setSessionId(byte[] newSessionId) {
         if (newSessionId != null) {
@@ -50,11 +51,21 @@ public class UdpAudioStreamer {
     private void sendPacket(byte type, byte[] payload) {
         try {
             // Header: type (1) + session_id (3) + sequence (4) = 8 bytes
-            ByteBuffer buffer = ByteBuffer.allocate(8 + payload.length);
+            // We append the previous payload for FEC: [Header][CurrentPayload][PreviousPayload]
+            int payloadLen = (payload != null) ? payload.length : 0;
+            int redundantLen = (lastPayload != null) ? lastPayload.length : 0;
+            
+            ByteBuffer buffer = ByteBuffer.allocate(8 + payloadLen + redundantLen);
             buffer.put(type);
             buffer.put(sessionId);
             buffer.putInt(sequenceNumber++);
-            buffer.put(payload);
+            
+            if (payload != null) {
+                buffer.put(payload);
+            }
+            if (lastPayload != null) {
+                buffer.put(lastPayload);
+            }
             
             byte[] packetData = buffer.array();
             DatagramPacket packet = new DatagramPacket(
@@ -65,6 +76,11 @@ public class UdpAudioStreamer {
             );
             
             socket.send(packet);
+            
+            // Store current payload for next packet's FEC
+            if (payload != null) {
+                lastPayload = payload;
+            }
         } catch (IOException e) {
             Log.e(TAG, "Error sending UDP packet: " + e.getMessage());
         }

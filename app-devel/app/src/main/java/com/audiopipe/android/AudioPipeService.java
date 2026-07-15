@@ -142,9 +142,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     }
 
     @Override
-    public void onAudioDataReceived(int sequence, byte[] data) {
+    public void onAudioDataReceived(int sequence, byte[] data, byte[] redundantData) {
         if (playbackEngine != null) {
-            playbackEngine.playAudio(sequence, data);
+            playbackEngine.playAudio(sequence, data, redundantData);
         }
     }
 

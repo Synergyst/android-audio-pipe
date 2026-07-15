@@ -17,7 +17,7 @@ public class UdpAudioReceiver implements Runnable {
     private byte[] currentSessionId = AudioConfig.SESSION_ID;
     
     public interface AudioReceiverListener {
-        void onAudioDataReceived(int sequence, byte[] data);
+        void onAudioDataReceived(int sequence, byte[] data, byte[] redundantData);
         void onPacketReceived(byte type, int sequence);
         void onSessionAssigned(byte[] sessionId);
         void onNegotiationComplete(int sampleRate);
@@ -44,11 +44,10 @@ public class UdpAudioReceiver implements Runnable {
         try {
             InetAddress address = InetAddress.getByName(ip);
             
-            // Header: type (1) + session_id (3) + sequence (4) = 8 bytes
             ByteBuffer buffer = ByteBuffer.allocate(8);
             buffer.put(AudioConfig.TYPE_HANDSHAKE_REQ);
             buffer.put(AudioConfig.SESSION_ID);
-            buffer.putInt(0); // Sequence 0 for handshake
+            buffer.putInt(0);
             
             byte[] data = buffer.array();
             DatagramPacket packet = new DatagramPacket(data, data.length, address, port);
@@ -77,7 +76,8 @@ public class UdpAudioReceiver implements Runnable {
 
     @Override
     public void run() {
-        byte[] incomingBuffer = new byte[AudioConfig.BUFFER_SIZE + 128];
+        // Buffer size must accommodate Header + 2 * BUFFER_SIZE
+        byte[] incomingBuffer = new byte[8 + (2 * AudioConfig.BUFFER_SIZE) + 128];
         while (isListening) {
             try {
                 DatagramPacket packet = new DatagramPacket(incomingBuffer, incomingBuffer.length);
@@ -92,7 +92,6 @@ public class UdpAudioReceiver implements Runnable {
                 byte[] session = new byte[3];
                 bb.get(session);
                 
-                // Allow Handshake response even if session doesn't match yet
                 if (type != AudioConfig.TYPE_HANDSHAKE_RESP) {
                     boolean sessionMatch = true;
                     for (int i = 0; i < 3; i++) {
@@ -127,10 +126,23 @@ public class UdpAudioReceiver implements Runnable {
                         }
                     }
                 } else if (type == AudioConfig.TYPE_AUDIO) {
-                    byte[] audioPayload = new byte[length - 8];
+                    // FIX: Use the constant BUFFER_SIZE instead of dividing length by 2
+                    int availableData = length - 8;
+                    int currentLen = Math.min(availableData, AudioConfig.BUFFER_SIZE);
+                    
+                    byte[] audioPayload = new byte[currentLen];
                     bb.get(audioPayload);
+                    
+                    byte[] redundantPayload = null;
+                    int remainingData = availableData - currentLen;
+                    if (remainingData > 0) {
+                        int redLen = Math.min(remainingData, AudioConfig.BUFFER_SIZE);
+                        redundantPayload = new byte[redLen];
+                        bb.get(redundantPayload);
+                    }
+                    
                     if (listener != null) {
-                        listener.onAudioDataReceived(sequence, audioPayload);
+                        listener.onAudioDataReceived(sequence, audioPayload, redundantPayload);
                     }
                 }
             } catch (IOException e) {
