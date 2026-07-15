@@ -186,6 +186,10 @@ void outbound_thread() {
     const double frequency = 440.0;
     const double phase_increment = 2.0 * M_PI * frequency / SAMPLE_RATE;
 
+    // Precise pacing for synthetic modes
+    auto next_packet_time = std::chrono::steady_clock::now();
+    const std::chrono::microseconds packet_interval(1000000LL * (BUFFER_SIZE / sizeof(int16_t)) / SAMPLE_RATE);
+
     while (running) {
         if (test_tone_mode) {
             for (auto& s : audio_samples) {
@@ -193,7 +197,8 @@ void outbound_thread() {
                 phase += phase_increment;
                 if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
+            std::this_thread::sleep_until(next_packet_time);
+            next_packet_time += packet_interval;
         } else if (!null_mode) {
             if (captureBuffer.available_to_read() < audio_samples.size()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -202,7 +207,8 @@ void outbound_thread() {
             captureBuffer.read(audio_samples.data(), audio_samples.size());
         } else {
             std::fill(audio_samples.begin(), audio_samples.end(), 0);
-            std::this_thread::sleep_for(std::chrono::milliseconds(11)); 
+            std::this_thread::sleep_until(next_packet_time);
+            next_packet_time += packet_interval;
         }
 
         PacketHeader header;
@@ -386,6 +392,10 @@ void setup_virtual_devices() {
         system(sink_cmd.c_str());
         std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(MIC_SOURCE_NAME) + " source_properties=device.description='" + std::string(MIC_SOURCE_DESC) + "' master=" + std::string(MIC_SINK_NAME) + ".monitor";
         system(source_cmd.c_str());
+        
+        // Set as system default source
+        system(("pactl set-default-source " + std::string(MIC_SOURCE_NAME)).c_str());
+        std::cout << "[System] Set default source to " << MIC_SOURCE_NAME << std::endl;
     }
 
     if (current_mode == RunMode::SPEAKER || current_mode == RunMode::DUPLEX) {
@@ -394,6 +404,10 @@ void setup_virtual_devices() {
         system(sink_cmd.c_str());
         std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(SPEAKER_SOURCE_NAME) + " source_properties=device.description='" + std::string(SPEAKER_SOURCE_DESC) + "' master=" + std::string(SPEAKER_SINK_NAME) + ".monitor";
         system(source_cmd.c_str());
+        
+        // Set as system default sink
+        system(("pactl set-default-sink " + std::string(SPEAKER_SINK_NAME)).c_str());
+        std::cout << "[System] Set default sink to " << SPEAKER_SINK_NAME << std::endl;
     }
 }
 
