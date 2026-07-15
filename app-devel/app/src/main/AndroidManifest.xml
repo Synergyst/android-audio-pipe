@@ -19,7 +19,7 @@
         android:allowBackup="true"
         android:label="Android Audio Pipe"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+        android:theme="@style/Theme.AppCompat.NoActionBar">
         
         <activity
             android:name=".MainActivity"

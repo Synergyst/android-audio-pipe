@@ -109,7 +109,7 @@ MERGED from [androidx.versionedparcelable:versionedparcelable:1.1.1] /root/.grad
 	android:allowBackup
 		ADDED from /root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:19:9-35
 	android:theme
-		ADDED from /root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:22:9-67
+		ADDED from /root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:22:9-59
 activity#com.audiopipe.android.MainActivity
 ADDED from /root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:24:9-31:20
 	android:exported

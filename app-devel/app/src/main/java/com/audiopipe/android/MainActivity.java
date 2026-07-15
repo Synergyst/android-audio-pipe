@@ -49,10 +49,12 @@ public class MainActivity extends AppCompatActivity {
                     statusText.setTextColor(Color.GREEN);
                     toggleButton.setText("STOP STREAM");
                     toggleButton.setBackgroundColor(Color.RED);
+                    toggleButton.setTextColor(Color.WHITE);
                 } else if ("DISCONNECTED".equals(state)) {
                     statusText.setTextColor(Color.LTGRAY);
                     toggleButton.setText("START STREAM");
-                    toggleButton.setBackgroundColor(Color.LTGRAY);
+                    toggleButton.setBackgroundColor(Color.parseColor("#444444"));
+                    toggleButton.setTextColor(Color.WHITE);
                 } else {
                     statusText.setTextColor(Color.YELLOW);
                 }
@@ -77,7 +79,7 @@ public class MainActivity extends AppCompatActivity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER);
         root.setPadding(50, 50, 50, 50);
-        root.setBackgroundColor(Color.BLACK);
+        root.setBackgroundColor(Color.parseColor("#121212"));
 
         TextView title = new TextView(this);
         title.setText("AUDIO PIPE");
@@ -90,14 +92,18 @@ public class MainActivity extends AppCompatActivity {
         ipInput = new EditText(this);
         ipInput.setHint("Server IP");
         ipInput.setTextColor(Color.WHITE);
-        ipInput.setHintTextColor(Color.GRAY);
+        ipInput.setHintTextColor(Color.parseColor("#888888"));
+        ipInput.setBackgroundColor(Color.parseColor("#2C2C2C"));
+        ipInput.setTextColor(Color.WHITE);
         ipInput.setText("192.168.168.12");
         root.addView(ipInput);
 
         portInput = new EditText(this);
         portInput.setHint("Server Port");
         portInput.setTextColor(Color.WHITE);
-        portInput.setHintTextColor(Color.GRAY);
+        portInput.setHintTextColor(Color.parseColor("#888888"));
+        portInput.setBackgroundColor(Color.parseColor("#2C2C2C"));
+        portInput.setTextColor(Color.WHITE);
         portInput.setText("12345");
         root.addView(portInput);
 
@@ -110,6 +116,7 @@ public class MainActivity extends AppCompatActivity {
         root.addView(settingsTitle);
 
         routingSpinner = new android.widget.Spinner(this);
+        routingSpinner.setBackgroundColor(Color.parseColor("#2C2C2C"));
         AudioConfig.RoutingMode[] modes = AudioConfig.RoutingMode.values();
         android.widget.ArrayAdapter<AudioConfig.RoutingMode> adapter = new android.widget.ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_item, modes);
@@ -125,11 +132,15 @@ public class MainActivity extends AppCompatActivity {
 
         testConnectionButton = new Button(this);
         testConnectionButton.setText("TEST CONNECTION");
+        testConnectionButton.setTextColor(Color.WHITE);
+        testConnectionButton.setBackgroundColor(Color.parseColor("#333333"));
         testConnectionButton.setOnClickListener(v -> performConnectionTest());
         root.addView(testConnectionButton);
 
         toggleButton = new Button(this);
         toggleButton.setText("START STREAM");
+        toggleButton.setTextColor(Color.WHITE);
+        toggleButton.setBackgroundColor(Color.parseColor("#444444"));
         toggleButton.setEnabled(false);
         toggleButton.setOnClickListener(v -> handleToggle());
         root.addView(toggleButton);
@@ -267,7 +278,7 @@ public class MainActivity extends AppCompatActivity {
 
         isServiceRunning = false;
         toggleButton.setText("START STREAM");
-        toggleButton.setBackgroundColor(Color.LTGRAY);
+        toggleButton.setBackgroundColor(Color.parseColor("#444444"));
         statusText.setText("Service Stopped.");
         statusText.setTextColor(Color.LTGRAY);
     }

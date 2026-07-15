@@ -34,7 +34,7 @@
         android:extractNativeLibs="false"
         android:label="Android Audio Pipe"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.Light.DarkActionBar" >
+        android:theme="@style/Theme.AppCompat.NoActionBar" >
         <activity
             android:name="com.audiopipe.android.MainActivity"
             android:exported="true" >

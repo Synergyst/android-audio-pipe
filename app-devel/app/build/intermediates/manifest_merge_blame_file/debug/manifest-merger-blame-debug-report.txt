@@ -58,8 +58,8 @@
 35-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:20:9-43
 36        android:supportsRtl="true"
 36-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:21:9-35
-37        android:theme="@style/Theme.AppCompat.Light.DarkActionBar" >
-37-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:22:9-67
+37        android:theme="@style/Theme.AppCompat.NoActionBar" >
+37-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:22:9-59
 38        <activity
 38-->/root/android-audio-pipe/app-devel/app/src/main/AndroidManifest.xml:24:9-31:20
 39            android:name="com.audiopipe.android.MainActivity"
