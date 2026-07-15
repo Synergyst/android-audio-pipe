@@ -19,6 +19,7 @@
 #include <mutex>
 #include <cmath>
 #include <random>
+#include <cstdlib>
 
 // Configuration
 const char* PHONE_IP = "192.168.168.120"; 
@@ -28,6 +29,12 @@ const unsigned int SAMPLE_RATE = 44100;
 const unsigned int CHANNELS = 1; // Match Android App (Mono)
 const size_t BUFFER_SIZE = 1024;
 const float INBOUND_GAIN = 2.0f;
+
+// Virtual Device Names for PulseAudio
+const char* VIRTUAL_SINK_NAME = "AndroidPipe";
+const char* VIRTUAL_SOURCE_NAME = "AndroidPipeMic";
+const char* VIRTUAL_SINK_DESC = "AndroidAudioPipe_Speaker";
+const char* VIRTUAL_SOURCE_DESC = "AndroidAudioPipe_Mic";
 
 enum PacketType : uint8_t {
     TYPE_AUDIO = 0x01,
@@ -352,6 +359,27 @@ void monitor_thread() {
     std::cout << std::endl;
 }
 
+void setup_virtual_devices() {
+    std::cout << "[System] Provisioning virtual audio devices..." << std::endl;
+    
+    // 1. Ensure PulseAudio is running
+    if (system("pgrep pulseaudio > /dev/null") != 0) {
+        std::cout << "[System] PulseAudio not detected. Attempting to start..." << std::endl;
+        system("pulseaudio -D --exit-idle-time=-1 2>/dev/null");
+        sleep(2);
+    }
+
+    // 2. Create Virtual Sink
+    std::cout << "[System] Creating virtual sink: " << VIRTUAL_SINK_NAME << std::endl;
+    std::string sink_cmd = "pactl load-module module-null-sink sink_name=" + std::string(VIRTUAL_SINK_NAME) + " sink_properties=device.description='" + std::string(VIRTUAL_SINK_DESC) + "'";
+    system(sink_cmd.c_str());
+
+    // 3. Create Virtual Source (remap from sink monitor)
+    std::cout << "[System] Creating virtual source: " << VIRTUAL_SOURCE_NAME << std::endl;
+    std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(VIRTUAL_SOURCE_NAME) + " source_properties=device.description='" + std::string(VIRTUAL_SOURCE_DESC) + "' master=" + std::string(VIRTUAL_SINK_NAME) + ".monitor";
+    system(source_cmd.c_str());
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--null") null_mode = true;
@@ -363,6 +391,15 @@ int main(int argc, char** argv) {
 
     std::cout << "--- High-Performance Audio Pipe (Miniaudio Edition) ---" << std::endl;
     
+    if (!null_mode) {
+        setup_virtual_devices();
+        
+        // Force PulseAudio to use our virtual devices for this process
+        setenv("PULSE_SINK", VIRTUAL_SINK_NAME, 1);
+        setenv("PULSE_SOURCE", VIRTUAL_SOURCE_NAME, 1);
+        std::cout << "[System] Environment set: SINK=" << VIRTUAL_SINK_NAME << ", SOURCE=" << VIRTUAL_SOURCE_NAME << std::endl;
+    }
+
     ma_device_config captureConfig = ma_device_config_init(ma_device_type_capture);
     captureConfig.capture.format = ma_format_s16;
     captureConfig.capture.channels = CHANNELS;
@@ -391,8 +428,8 @@ int main(int argc, char** argv) {
         ma_device_start(&playbackDevice);
     }
 
-    std::cout << "PC Capture: Default Device -> Phone: " << PHONE_IP << ":" << SEND_PORT << std::endl;
-    std::cout << "Phone: " << RECV_PORT << " -> PC Playback: Default Device" << std::endl;
+    std::cout << "PC Capture: " << (null_mode ? "NULL" : VIRTUAL_SOURCE_NAME) << " -> Phone: " << PHONE_IP << ":" << SEND_PORT << std::endl;
+    std::cout << "Phone: " << RECV_PORT << " -> PC Playback: " << (null_mode ? "NULL" : VIRTUAL_SINK_NAME) << std::endl;
 
     std::thread t_out(outbound_thread);
     std::thread t_in(inbound_thread);
