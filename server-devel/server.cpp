@@ -20,6 +20,7 @@
 #include <cmath>
 #include <random>
 #include <cstdlib>
+#include <queue>
 
 // Configuration
 const char* PHONE_IP = "192.168.168.120"; 
@@ -27,7 +28,7 @@ const int RECV_PORT = 12345;
 const int SEND_PORT = 12346; 
 const unsigned int SAMPLE_RATE = 44100;
 const unsigned int CHANNELS = 1; // Match Android App (Mono)
-const size_t BUFFER_SIZE = 1024;
+const size_t BUFFER_SIZE = 512;
 const float INBOUND_GAIN = 2.0f;
 
 enum class RunMode {
@@ -137,6 +138,13 @@ public:
     }
 };
 
+// Jitter Buffer Packet
+struct AudioPacket {
+    uint32_t sequence;
+    std::vector<int16_t> samples;
+    bool operator>(const AudioPacket& other) const { return sequence > other.sequence; }
+};
+
 std::atomic<bool> running(true);
 std::atomic<bool> null_mode(false);
 std::atomic<bool> test_tone_mode(false);
@@ -146,6 +154,15 @@ std::mutex session_mtx;
 
 AudioRingBuffer<int16_t> captureBuffer(SAMPLE_RATE * 2);
 AudioRingBuffer<int16_t> playbackBuffer(SAMPLE_RATE * 2);
+
+// Jitter Buffer state
+std::priority_queue<AudioPacket, std::vector<AudioPacket>, std::greater<AudioPacket>> jitterBuffer;
+std::mutex jitterMtx;
+uint32_t nextExpectedSeq = 0;
+bool firstPacketReceived = false;
+const size_t JITTER_THRESHOLD = 5;
+const size_t DRIFT_THRESHOLD = 30;
+const size_t MAX_JITTER_SIZE = 50;
 
 void data_capture_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     if (null_mode) return;
@@ -165,13 +182,13 @@ void set_rt_priority() {
     struct sched_param param;
     param.sched_priority = 99;
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
-        std::cerr << \"Warning: Failed to set SCHED_FIFO priority. Run as root!\" << std::endl;
+        std::cerr << "Warning: Failed to set SCHED_FIFO priority. Run as root!" << std::endl;
     }
 }
 
 void outbound_thread() {
     set_rt_priority();
-    std::cout << \"[Outbound] Thread started\" << std::endl;
+    std::cout << "[Outbound] Thread started" << std::endl;
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in phone_addr;
@@ -242,7 +259,7 @@ void outbound_thread() {
 
 void inbound_thread() {
     set_rt_priority();
-    std::cout << \"[Inbound] Thread started\" << std::endl;
+    std::cout << "[Inbound] Thread started" << std::endl;
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in my_addr;
@@ -252,7 +269,7 @@ void inbound_thread() {
     my_addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(sock, (struct sockaddr*)&my_addr, sizeof(my_addr)) < 0) {
-        std::cerr << \"[Inbound] Bind error: \" << strerror(errno) << std::endl;
+        std::cerr << "[Inbound] Bind error: " << strerror(errno) << std::endl;
         return;
     }
 
@@ -273,7 +290,7 @@ void inbound_thread() {
         
         if (len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            if (running) std::cerr << \"[Inbound] recvfrom error: \" << strerror(errno) << std::endl;
+            if (running) std::cerr << "[Inbound] recvfrom error: " << strerror(errno) << std::endl;
             continue;
         }
         
@@ -283,7 +300,7 @@ void inbound_thread() {
         std::memcpy(&header, buffer.data(), sizeof(PacketHeader));
         
         if (header.type == TYPE_HANDSHAKE_REQ) {
-            std::cout << \"\\n[Inbound] Handshake request from \" << inet_ntoa(from_addr.sin_addr) << \". Assigning session...\" << std::endl;
+            std::cout << "\n[Inbound] Handshake request from " << inet_ntoa(from_addr.sin_addr) << ". Assigning session..." << std::endl;
             PacketHeader resp;
             resp.type = TYPE_HANDSHAKE_RESP;
             {
@@ -317,6 +334,12 @@ void inbound_thread() {
 
         if (header.type == TYPE_AUDIO) {
             uint32_t seq = ntohl(header.sequence);
+            
+            if (!firstPacketReceived) {
+                nextExpectedSeq = seq;
+                firstPacketReceived = true;
+            }
+
             int lost = 0;
             if (stats.last_sequence > 0 && seq > stats.last_sequence + 1) {
                 lost = seq - stats.last_sequence - 1;
@@ -330,20 +353,44 @@ void inbound_thread() {
                 size_t available_payload = len - sizeof(PacketHeader);
                 if (available_payload == 0) continue;
                 
-                // FIX: Use defined BUFFER_SIZE, not dividing total length by 2
                 size_t current_payload_len = std::min(available_payload, BUFFER_SIZE);
                 uint8_t* audio_ptr = buffer.data() + sizeof(PacketHeader);
                 
-                int16_t* samples = reinterpret_cast<int16_t*>(audio_ptr);
+                int16_t* samples_raw = reinterpret_cast<int16_t*>(audio_ptr);
                 int num_samples = current_payload_len / sizeof(int16_t);
+                std::vector<int16_t> current_samples(num_samples);
                 
                 for (int i = 0; i < num_samples; ++i) {
-                    float sample = samples[i] * INBOUND_GAIN;
+                    float sample = samples_raw[i] * INBOUND_GAIN;
                     if (sample > 32767.0f) sample = 32767.0f;
                     if (sample < -32768.0f) sample = -32768.0f;
-                    samples[i] = static_cast<int16_t>(sample);
+                    current_samples[i] = static_cast<int16_t>(sample);
                 }
-                playbackBuffer.write(samples, num_samples);
+
+                size_t redundant_offset = sizeof(PacketHeader) + current_payload_len;
+                if (redundant_offset < available_payload) {
+                    size_t red_len = std::min(available_payload - redundant_offset, BUFFER_SIZE);
+                    uint8_t* red_ptr = buffer.data() + redundant_offset;
+                    int16_t* red_samples_raw = reinterpret_cast<int16_t*>(red_ptr);
+                    int red_num_samples = red_len / sizeof(int16_t);
+                    
+                    if (seq > nextExpectedSeq && nextExpectedSeq != 0) {
+                        std::vector<int16_t> recovered_samples(red_num_samples);
+                        for(int i=0; i<red_num_samples; ++i) {
+                            float s = red_samples_raw[i] * INBOUND_GAIN;
+                            if (s > 32767.0f) s = 32767.0f;
+                            if (s < -32768.0f) s = -32768.0f;
+                            recovered_samples[i] = static_cast<int16_t>(s);
+                        }
+                        std::lock_guard<std::mutex> lock(jitterMtx);
+                        jitterBuffer.push({nextExpectedSeq, recovered_samples});
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(jitterMtx);
+                    jitterBuffer.push({seq, current_samples});
+                }
             }
         } else if (header.type == TYPE_PING) {
             PacketHeader pong;
@@ -355,7 +402,7 @@ void inbound_thread() {
             pong.sequence = 0;
             sendto(sock, &pong, sizeof(PacketHeader), 0, (struct sockaddr*)&from_addr, from_len);
         } else if (header.type == TYPE_NEGOTIATE) {
-            std::cout << \"\\n[Inbound] Negotiation request. Confirming 44.1kHz...\" << std::endl;
+            std::cout << "\n[Inbound] Negotiation request. Confirming 44.1kHz..." << std::endl;
             PacketHeader resp;
             resp.type = TYPE_NEGOTIATE;
             {
@@ -374,6 +421,52 @@ void inbound_thread() {
     close(sock);
 }
 
+void jitter_drain_thread() {
+    set_rt_priority();
+    std::cout << "[JitterDrain] Thread started" << std::endl;
+    
+    while (running) {
+        std::vector<int16_t> samples_to_play;
+        {
+            std::lock_guard<std::mutex> lock(jitterMtx);
+            if (!jitterBuffer.empty()) {
+                if (jitterBuffer.size() > DRIFT_THRESHOLD) {
+                    while(jitterBuffer.size() > JITTER_THRESHOLD) {
+                        jitterBuffer.pop();
+                    }
+                    if (!jitterBuffer.empty()) {
+                        nextExpectedSeq = jitterBuffer.top().sequence;
+                    }
+                }
+
+                if (jitterBuffer.size() >= JITTER_THRESHOLD) {
+                    AudioPacket p = jitterBuffer.top();
+                    
+                    if (p.sequence == nextExpectedSeq) {
+                        samples_to_play = p.samples;
+                        nextExpectedSeq++;
+                        jitterBuffer.pop();
+                    } else if (p.sequence < nextExpectedSeq) {
+                        jitterBuffer.pop();
+                    } else {
+                        if (jitterBuffer.size() > MAX_JITTER_SIZE) { 
+                             samples_to_play = p.samples;
+                             nextExpectedSeq = p.sequence + 1;
+                             jitterBuffer.pop();
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!samples_to_play.empty()) {
+            playbackBuffer.write(samples_to_play.data(), samples_to_play.size());
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
+
 void monitor_thread() {
     while (running) {
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -381,11 +474,11 @@ void monitor_thread() {
         long long last_seen = stats.last_seen_ms;
         long long diff = (last_seen == 0) ? -1 : (now_ms - last_seen);
         
-        std::cout << \"\\r\" << \"[Status] \" 
-                  << (diff != -1 && diff < 3000 ? \"CONNECTED ✅\" : \"DISCONNECTED ❌\") 
-                  << \" | Pkts: \" << stats.packets_received 
-                  << \" | Rolling Loss: \" << std::fixed << std::setprecision(2) << stats.get_rolling_loss_pct() << \"%\"\
-                  << \" | Latency: \" << (diff == -1 || diff >= 3000 ? \"N/A\" : std::to_string(diff) + \"ms\") << \" \" << std::flush;
+        std::cout << "\r" << "[Status] " 
+                  << (diff != -1 && diff < 3000 ? "CONNECTED ✅" : "DISCONNECTED ❌") 
+                  << " | Pkts: " << stats.packets_received 
+                  << " | Rolling Loss: " << std::fixed << std::setprecision(2) << stats.get_rolling_loss_pct() << "%"
+                  << " | Latency: " << (diff == -1 || diff >= 3000 ? "N/A" : std::to_string(diff) + "ms") << " " << std::flush;
         
         if (diff >= 3000) stats.connected = false;
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -394,75 +487,75 @@ void monitor_thread() {
 }
 
 void setup_virtual_devices() {
-    std::cout << \"[System] Provisioning isolated virtual audio devices...\" << std::endl;
+    std::cout << "[System] Provisioning isolated virtual audio devices..." << std::endl;
     
-    if (system(\"pgrep pulseaudio > /dev/null\") != 0) {
-        std::cout << \"[System] PulseAudio not detected. Attempting to start...\" << std::endl;
-        system(\"pulseaudio -D --exit-idle-time=-1 2>/dev/null\");
+    if (system("pgrep pulseaudio > /dev/null") != 0) {
+        std::cout << "[System] PulseAudio not detected. Attempting to start..." << std::endl;
+        system("pulseaudio -D --exit-idle-time=-1 2>/dev/null");
         sleep(2);
     }
 
     if (current_mode == RunMode::MIC || current_mode == RunMode::DUPLEX) {
-        std::cout << \"[System] Creating Mic path: \" << MIC_SOURCE_NAME << std::endl;
-        std::string sink_cmd = \"pactl load-module module-null-sink sink_name=\" + std::string(MIC_SINK_NAME) + \" sink_properties=device.description='\" + std::string(MIC_SINK_DESC) + \"'\";
+        std::cout << "[System] Creating Mic path: " << MIC_SOURCE_NAME << std::endl;
+        std::string sink_cmd = "pactl load-module module-null-sink sink_name=" + std::string(MIC_SINK_NAME) + " sink_properties=device.description='" + std::string(MIC_SINK_DESC) + "'";
         system(sink_cmd.c_str());
-        std::string source_cmd = \"pactl load-module module-remap-source source_name=\" + std::string(MIC_SOURCE_NAME) + \" source_properties=device.description='\" + std::string(MIC_SOURCE_DESC) + \"' master=\" + std::string(MIC_SINK_NAME) + \".monitor\";
+        std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(MIC_SOURCE_NAME) + " source_properties=device.description='" + std::string(MIC_SOURCE_DESC) + "' master=" + std::string(MIC_SINK_NAME) + ".monitor";
         system(source_cmd.c_str());
         
-        system((\"pactl set-default-source \" + std::string(MIC_SOURCE_NAME)).c_str());
-        std::cout << \"[System] Set default source to \" << MIC_SOURCE_NAME << std::endl;
+        system(("pactl set-default-source " + std::string(MIC_SOURCE_NAME)).c_str());
+        std::cout << "[System] Set default source to " << MIC_SOURCE_NAME << std::endl;
     }
 
     if (current_mode == RunMode::SPEAKER || current_mode == RunMode::DUPLEX) {
-        std::cout << \"[System] Creating Speaker path: \" << SPEAKER_SINK_NAME << std::endl;
-        std::string sink_cmd = \"pactl load-module module-null-sink sink_name=\" + std::string(SPEAKER_SINK_NAME) + \" sink_properties=device.description='\" + std::string(SPEAKER_SINK_DESC) + \"'\";
+        std::cout << "[System] Creating Speaker path: " << SPEAKER_SINK_NAME << std::endl;
+        std::string sink_cmd = "pactl load-module module-null-sink sink_name=" + std::string(SPEAKER_SINK_NAME) + " sink_properties=device.description='" + std::string(SPEAKER_SINK_DESC) + "'";
         system(sink_cmd.c_str());
-        std::string source_cmd = \"pactl load-module module-remap-source source_name=\" + std::string(SPEAKER_SOURCE_NAME) + \" source_properties=device.description='\" + std::string(SPEAKER_SOURCE_DESC) + \"' master=\" + std::string(SPEAKER_SINK_NAME) + \".monitor\";
+        std::string source_cmd = "pactl load-module module-remap-source source_name=" + std::string(SPEAKER_SOURCE_NAME) + " source_properties=device.description='" + std::string(SPEAKER_SOURCE_DESC) + "' master=" + std::string(SPEAKER_SINK_NAME) + ".monitor";
         system(source_cmd.c_str());
         
-        system((\"pactl set-default-sink \" + std::string(SPEAKER_SINK_NAME)).c_str());
-        std::cout << \"[System] Set default sink to \" << SPEAKER_SINK_NAME << std::endl;
+        system(("pactl set-default-sink " + std::string(SPEAKER_SINK_NAME)).c_str());
+        std::cout << "[System] Set default sink to " << SPEAKER_SINK_NAME << std::endl;
     }
 }
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == \"--null\") null_mode = true;
-        if (arg == \"--test-tone\") test_tone_mode = true;
-        if (arg == \"--mode\") {
+        if (arg == "--null") null_mode = true;
+        if (arg == "--test-tone") test_tone_mode = true;
+        if (arg == "--mode") {
             if (i + 1 < argc) {
                 std::string m = argv[++i];
-                if (m == \"mic\") current_mode = RunMode::MIC;
-                else if (m == \"speaker\") current_mode = RunMode::SPEAKER;
-                else if (m == \"duplex\") current_mode = RunMode::DUPLEX;
-                else std::cerr << \"Unknown mode: \" << m << \". Using duplex.\" << std::endl;
+                if (m == "mic") current_mode = RunMode::MIC;
+                else if (m == "speaker") current_mode = RunMode::SPEAKER;
+                else if (m == "duplex") current_mode = RunMode::DUPLEX;
+                else std::cerr << "Unknown mode: " << m << ". Using duplex." << std::endl;
             }
         }
     }
 
-    if (null_mode) std::cout << \"!!! RUNNING IN NULL-AUDIO MODE (Bypassing Audio Hardware) !!!\" << std::endl;
-    if (test_tone_mode) std::cout << \"!!! TEST TONE MODE ACTIVE: Generating 440Hz Sine Wave !!!\" << std::endl;
+    if (null_mode) std::cout << "!!! RUNNING IN NULL-AUDIO MODE (Bypassing Audio Hardware) !!!" << std::endl;
+    if (test_tone_mode) std::cout << "!!! TEST TONE MODE ACTIVE: Generating 440Hz Sine Wave !!!" << std::endl;
 
-    std::cout << \"--- High-Performance Audio Pipe (Miniaudio Edition) ---\\n\";
+    std::cout << "--- High-Performance Audio Pipe (Miniaudio Edition) ---\n";
     
     if (!null_mode) {
         setup_virtual_devices();
         
         if (current_mode == RunMode::MIC) {
-            setenv(\"PULSE_SINK\", MIC_SINK_NAME, 1);
-            std::string src = std::string(MIC_SINK_NAME) + \".monitor\";
-            setenv(\"PULSE_SOURCE\", src.c_str(), 1);
+            setenv("PULSE_SINK", MIC_SINK_NAME, 1);
+            std::string src = std::string(MIC_SINK_NAME) + ".monitor";
+            setenv("PULSE_SOURCE", src.c_str(), 1);
         } else if (current_mode == RunMode::SPEAKER) {
-            setenv(\"PULSE_SINK\", SPEAKER_SINK_NAME, 1);
-            std::string src = std::string(SPEAKER_SINK_NAME) + \".monitor\";
-            setenv(\"PULSE_SOURCE\", src.c_str(), 1);
+            setenv("PULSE_SINK", SPEAKER_SINK_NAME, 1);
+            std::string src = std::string(SPEAKER_SINK_NAME) + ".monitor";
+            setenv("PULSE_SOURCE", src.c_str(), 1);
         } else {
-            setenv(\"PULSE_SINK\", MIC_SINK_NAME, 1); 
-            std::string src = std::string(SPEAKER_SINK_NAME) + \".monitor\";
-            setenv(\"PULSE_SOURCE\", src.c_str(), 1);
+            setenv("PULSE_SINK", MIC_SINK_NAME, 1); 
+            std::string src = std::string(SPEAKER_SINK_NAME) + ".monitor";
+            setenv("PULSE_SOURCE", src.c_str(), 1);
         }
-        std::cout << \"[System] Mode: \" << (current_mode == RunMode::MIC ? \"MIC\" : current_mode == RunMode::SPEAKER ? \"SPEAKER\" : \"DUPLEX\") << std::endl;
+        std::cout << "[System] Mode: " << (current_mode == RunMode::MIC ? "MIC" : current_mode == RunMode::SPEAKER ? "SPEAKER" : "DUPLEX") << std::endl;
     }
 
     ma_device_config captureConfig = ma_device_config_init(ma_device_type_capture);
@@ -478,11 +571,11 @@ int main(int argc, char** argv) {
             ma_device_start(&captureDevice);
             capture_started = true;
         } else {
-            std::cerr << \"Failed to initialize capture device\" << std::endl;
+            std::cerr << "Failed to initialize capture device" << std::endl;
             return 1;
         }
     } else {
-        std::cout << \"[System] Capture disabled (Mode: \" << (current_mode == RunMode::MIC ? \"MIC\" : \"NULL\") << \").\" << std::endl;
+        std::cout << "[System] Capture disabled (Mode: " << (current_mode == RunMode::MIC ? "MIC" : "NULL") << ")." << std::endl;
     }
 
     ma_device_config playbackConfig = ma_device_config_init(ma_device_type_playback);
@@ -498,26 +591,28 @@ int main(int argc, char** argv) {
             ma_device_start(&playbackDevice);
             playback_started = true;
         } else {
-            std::cerr << \"Failed to initialize playback device\" << std::endl;
+            std::cerr << "Failed to initialize playback device" << std::endl;
             return 1;
         }
     } else {
-        std::cout << \"[System] Playback disabled (Mode: \" << (current_mode == RunMode::SPEAKER ? \"SPEAKER\" : \"NULL\") << \").\" << std::endl;
+        std::cout << "[System] Playback disabled (Mode: " << (current_mode == RunMode::SPEAKER ? "SPEAKER" : "NULL") << ")." << std::endl;
     }
 
-    std::cout << \"PC Capture (to Phone): \" << (null_mode ? \"NULL\" : SPEAKER_SOURCE_NAME) << \" -> \" << PHONE_IP << \":\" << SEND_PORT << std::endl;
-    std::cout << \"Phone (to PC): \" << RECV_PORT << \" -> PC Playback: \" << (null_mode ? \"NULL\" : MIC_SINK_NAME) << std::endl;
+    std::cout << "PC Capture (to Phone): " << (null_mode ? "NULL" : SPEAKER_SOURCE_NAME) << " -> " << PHONE_IP << ":" << SEND_PORT << std::endl;
+    std::cout << "Phone (to PC): " << RECV_PORT << " -> PC Playback: " << (null_mode ? "NULL" : MIC_SINK_NAME) << std::endl;
 
     std::thread t_out(outbound_thread);
     std::thread t_in(inbound_thread);
+    std::thread t_drain(jitter_drain_thread);
     std::thread t_mon(monitor_thread);
 
-    std::cout << \"Server running. Press Enter to stop.\" << std::endl;
+    std::cout << "Server running. Press Enter to stop." << std::endl;
     std::cin.get();
 
     running = false;
     t_out.join();
     t_in.join();
+    t_drain.join();
     t_mon.join();
 
     if (capture_started) ma_device_uninit(&captureDevice);

@@ -4,7 +4,7 @@ public class AudioConfig {
     public static final int SAMPLE_RATE = 44100;
     public static final int CHANNEL_CONFIG = android.media.AudioFormat.CHANNEL_IN_MONO;
     public static final int AUDIO_FORMAT = android.media.AudioFormat.ENCODING_PCM_16BIT;
-    public static final int BUFFER_SIZE = 1024; // Restored to 1KB for better stability and timing
+    public static final int BUFFER_SIZE = 512; // Reduced to 512B to avoid MTU fragmentation with FEC (Total ~1KB)
 
     // Packet Types (Must match server.cpp)
     public static final byte TYPE_AUDIO = 0x01;

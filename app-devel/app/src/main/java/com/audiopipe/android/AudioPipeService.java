@@ -102,7 +102,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 
                 updateState(ServiceState.CONNECTING);
                 udpReceiver.sendHandshake(serverIp, serverPort);
-                udpReceiver.sendNegotiationRequest(serverIp, serverPort);
+                // REMOVED: udpReceiver.sendNegotiationRequest(serverIp, serverPort);
                 lastHandshakeSent = System.currentTimeMillis();
                 
                 captureEngine = new AudioCaptureEngine(this, useAecNr);
@@ -155,6 +155,10 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (type == AudioConfig.TYPE_HANDSHAKE_RESP) {
             Log.i(TAG, "Handshake response received! Connection established.");
             updateState(ServiceState.CONNECTED);
+            // Trigger negotiation AFTER handshake success to ensure correct session ID
+            if (udpReceiver != null) {
+                udpReceiver.sendNegotiationRequest(serverIp, serverPort);
+            }
         } else if (type == AudioConfig.TYPE_PONG) {
             if (currentState == ServiceState.CONNECTION_LOST) {
                 updateState(ServiceState.CONNECTED);
@@ -233,6 +237,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
                     // 2. Monitor for Connection Loss (Heartbeat)
                     if (currentState == ServiceState.CONNECTED) {
+                        if (udpStreamer != null) {
+                            udpStreamer.sendPing();
+                        }
                         if (now - lastPacketSeen > CONNECTION_TIMEOUT_MS) {
                             Log.w(TAG, "No packets received for " + CONNECTION_TIMEOUT_MS + "ms. Connection lost!");
                             updateState(ServiceState.CONNECTION_LOST);
