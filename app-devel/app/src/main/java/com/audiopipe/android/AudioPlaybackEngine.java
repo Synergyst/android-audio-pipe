@@ -85,9 +85,6 @@ public class AudioPlaybackEngine implements Runnable {
             return;
         }
 
-        AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-        audioManager.setMode(AudioManager.MODE_NORMAL);
-
         isPlaying = true;
         audioTrack.play();
         

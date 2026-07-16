@@ -35,7 +35,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private int localListenPort = 12346;
     private int controlPort = 12347;
 
-    private AudioConfig.RoutingMode routingMode = AudioConfig.RoutingMode.NORMAL;
+    private AudioConfig.RoutingMode routingMode = AudioConfig.RoutingMode.SPEAKERPHONE;
     private boolean useAecNr = false;
 
     private ServiceState currentState = ServiceState.DISCONNECTED;

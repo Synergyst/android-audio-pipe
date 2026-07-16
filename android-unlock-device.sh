@@ -23,7 +23,7 @@ if [[ "$1" == "--lock" ]]; then
 fi
 
 # --- CONFIGURATION ---
-LANDSCAPE_ROTATION=1 
+LANDSCAPE_ROTATION=1
 PACKAGE_NAME="com.audiopipe.android"
 MAIN_ACTIVITY="com.audiopipe.android/.MainActivity"
 PIN_PAD_WINDOW="Bouncer"
