@@ -41,32 +41,38 @@ fi
 # 2. Unlock Sequence with Safety Verification
 echo "Performing unlock swipe..."
 adb shell input swipe 500 1500 500 500 100
-sleep 1.0
+sleep 1.5
 
 CURRENT_FOCUS=$(adb shell dumpsys window | grep "mCurrentFocus" | grep "$PIN_PAD_WINDOW")
 
 if [ ! -z "$CURRENT_FOCUS" ]; then
     echo "PIN pad detected ($PIN_PAD_WINDOW). Sending PIN..."
     adb shell input text "$PIN"
-    sleep 1.0
+    sleep 4.0
 else
     echo "PIN pad not detected. Device might already be unlocked. Skipping PIN entry."
 fi
 
-# 3. Restart Audio Pipe App
+# 3. Ensure Permissions are Granted
+echo "Ensuring permissions are granted for $PACKAGE_NAME..."
+adb shell pm grant "$PACKAGE_NAME" android.permission.RECORD_AUDIO
+# Note: MODIFY_AUDIO_SETTINGS, INTERNET and WAKE_LOCK are normal permissions and granted at install time.
+
+# 4. Restart Audio Pipe App
 echo "Restarting Audio Pipe app..."
+sleep 2.0 # Give Android some time to catch up
 adb shell am force-stop "$PACKAGE_NAME"
-sleep 0.5
+sleep 2.0 # Give Android some time to catch up
 adb shell am start -n "$MAIN_ACTIVITY"
 sleep 2.0 # Give the app time to load and connect to service
 
-# 4. Handle Rotation (FINAL STEP)
-echo "Forcing orientation to locked landscape..."
-adb shell settings put system accelerometer_rotation 0
-adb shell settings put system user_rotation $LANDSCAPE_ROTATION
-adb shell settings put secure user_rotation $LANDSCAPE_ROTATION
+# 5. Handle Rotation (FINAL STEP)
+#echo "Forcing orientation to locked landscape..."
+#adb shell settings put system accelerometer_rotation 0
+#adb shell settings put system user_rotation $LANDSCAPE_ROTATION
+#adb shell settings put secure user_rotation $LANDSCAPE_ROTATION
 
-# 5. Optional Lock
+# 6. Optional Lock
 if [ "$LOCK_AT_END" = true ]; then
     echo "Locking device (turning off screen)..."
     adb shell input keyevent 26

@@ -16,6 +16,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private static final String TAG = "AudioPipeService";
     public static final String ACTION_STOP = "STOP_SERVICE";
     public static final String ACTION_OPEN_APP = "OPEN_APP";
+    public static final String ACTION_UPDATE_ROUTING = "UPDATE_ROUTING";
     
     public enum ServiceState {
         DISCONNECTED,
@@ -55,6 +56,15 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
             updateState(ServiceState.DISCONNECTED);
             stopSelf();
             return START_NOT_STICKY;
+        }
+
+        if (ACTION_UPDATE_ROUTING.equals(intent.getAction())) {
+            if (intent.hasExtra("ROUTING_MODE")) {
+                routingMode = (AudioConfig.RoutingMode) intent.getSerializableExtra("ROUTING_MODE");
+                configureAudioRouting();
+                Log.i(TAG, "Routing mode updated via Intent: " + routingMode);
+            }
+            return START_STICKY;
         }
 
         if (ACTION_OPEN_APP.equals(intent.getAction())) {

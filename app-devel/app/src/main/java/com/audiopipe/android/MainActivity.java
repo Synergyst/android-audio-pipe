@@ -237,6 +237,13 @@ public class MainActivity extends AppCompatActivity {
         if (!isServiceRunning) {
             startAudioPipe();
         } else {
+            if (routingSpinner.getSelectedItemPosition() != -1) {
+                AudioConfig.RoutingMode mode = (AudioConfig.RoutingMode) routingSpinner.getSelectedItem();
+                Intent intent = new Intent(this, AudioPipeService.class);
+                intent.setAction("UPDATE_ROUTING");
+                intent.putExtra("ROUTING_MODE", mode);
+                startService(intent);
+            }
             stopAudioPipe();
         }
     }
@@ -289,7 +296,7 @@ public class MainActivity extends AppCompatActivity {
         ipInput.setText(prefs.getString("pref_ip", "192.168.168.12"));
         portInput.setText(prefs.getString("pref_port", "12345"));
         
-        int modeOrdinal = prefs.getInt(AudioConfig.PREF_ROUTING_MODE, 0);
+        int modeOrdinal = prefs.getInt(AudioConfig.PREF_ROUTING_MODE, AudioConfig.RoutingMode.SPEAKERPHONE.ordinal());
         routingSpinner.setSelection(modeOrdinal);
         
         aecCheckBox.setChecked(prefs.getBoolean(AudioConfig.PREF_AEC_NR, false));
