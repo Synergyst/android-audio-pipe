@@ -64,7 +64,7 @@ public class UdpAudioReceiver implements Runnable {
             InetAddress address = InetAddress.getByName(ip);
             ByteBuffer buffer = ByteBuffer.allocate(8);
             buffer.put(AudioConfig.TYPE_NEGOTIATE);
-            buffer.put(AudioConfig.SESSION_ID);
+            buffer.put(currentSessionId);
             buffer.putInt(0);
             byte[] data = buffer.array();
             DatagramPacket packet = new DatagramPacket(data, data.length, address, port);

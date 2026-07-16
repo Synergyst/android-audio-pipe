@@ -14,6 +14,7 @@ public class AudioConfig {
     public static final byte TYPE_HANDSHAKE_REQ = 0x05;
     public static final byte TYPE_HANDSHAKE_RESP = 0x06;
     public static final byte TYPE_NEGOTIATE = 0x07;
+    public static final byte TYPE_DISCONNECT = 0x08;
 
     // Session ID (Must match server.cpp)
     public static final byte[] SESSION_ID = { (byte)0xDE, (byte)0xAD, (byte)0xBE };

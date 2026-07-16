@@ -229,7 +229,8 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                             Log.i(TAG, "Attempting connection/reconnection...");
                             if (udpReceiver != null) {
                                 udpReceiver.sendHandshake(serverIp, serverPort);
-                                udpReceiver.sendNegotiationRequest(serverIp, serverPort);
+                                // REMOVED: udpReceiver.sendNegotiationRequest(serverIp, serverPort);
+                                // Negotiation should only happen after Handshake Response is received
                                 lastHandshakeSent = now;
                             }
                         }

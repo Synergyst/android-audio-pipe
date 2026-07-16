@@ -86,7 +86,14 @@ public class UdpAudioStreamer {
         }
     }
 
+    public void sendDisconnect() {
+        if (!isStreaming || socket == null) return;
+        sendPacket(AudioConfig.TYPE_DISCONNECT, new byte[0]);
+        Log.i(TAG, "Disconnect packet sent.");
+    }
+
     public void stop() {
+        sendDisconnect();
         isStreaming = false;
         if (socket != null) {
             socket.close();

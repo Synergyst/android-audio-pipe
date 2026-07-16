@@ -56,7 +56,8 @@ enum PacketType : uint8_t {
     TYPE_STATS = 0x04,
     TYPE_HANDSHAKE_REQ = 0x05,
     TYPE_HANDSHAKE_RESP = 0x06,
-    TYPE_NEGOTIATE = 0x07
+    TYPE_NEGOTIATE = 0x07,
+    TYPE_DISCONNECT = 0x08
 };
 
 #pragma pack(push, 1)
@@ -160,9 +161,12 @@ std::priority_queue<AudioPacket, std::vector<AudioPacket>, std::greater<AudioPac
 std::mutex jitterMtx;
 uint32_t nextExpectedSeq = 0;
 bool firstPacketReceived = false;
-const size_t JITTER_THRESHOLD = 5;
+const size_t JITTER_THRESHOLD_MIN = 3;
+const size_t JITTER_THRESHOLD_MAX = 20;
 const size_t DRIFT_THRESHOLD = 30;
 const size_t MAX_JITTER_SIZE = 50;
+
+std::atomic<size_t> adaptive_jitter_threshold{5};
 
 void data_capture_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     if (null_mode) return;
@@ -305,9 +309,11 @@ void inbound_thread() {
             resp.type = TYPE_HANDSHAKE_RESP;
             {
                 std::lock_guard<std::mutex> lock(session_mtx);
-                CURRENT_SESSION[0] = dis(gen);
-                CURRENT_SESSION[1] = dis(gen);
-                CURRENT_SESSION[2] = dis(gen);
+                if (CURRENT_SESSION[0] == 0 && CURRENT_SESSION[1] == 0 && CURRENT_SESSION[2] == 0) {
+                    CURRENT_SESSION[0] = dis(gen);
+                    CURRENT_SESSION[1] = dis(gen);
+                    CURRENT_SESSION[2] = dis(gen);
+                }
                 memcpy(resp.session_id, CURRENT_SESSION, 3);
             }
             resp.sequence = 0;
@@ -326,6 +332,16 @@ void inbound_thread() {
             }
         }
         if (!sessionMatch) continue;
+
+        if (header.type == TYPE_DISCONNECT) {
+            std::cout << "\n[Inbound] Client disconnected explicitly." << std::endl;
+            stats.connected = false;
+            {
+                std::lock_guard<std::mutex> lock(session_mtx);
+                memset(CURRENT_SESSION, 0, 3);
+            }
+            continue;
+        }
 
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -374,17 +390,22 @@ void inbound_thread() {
                     int16_t* red_samples_raw = reinterpret_cast<int16_t*>(red_ptr);
                     int red_num_samples = red_len / sizeof(int16_t);
                     
-                    if (seq > nextExpectedSeq && nextExpectedSeq != 0) {
-                        std::vector<int16_t> recovered_samples(red_num_samples);
-                        for(int i=0; i<red_num_samples; ++i) {
-                            float s = red_samples_raw[i] * INBOUND_GAIN;
-                            if (s > 32767.0f) s = 32767.0f;
-                            if (s < -32768.0f) s = -32768.0f;
-                            recovered_samples[i] = static_cast<int16_t>(s);
-                        }
-                        std::lock_guard<std::mutex> lock(jitterMtx);
-                        jitterBuffer.push({nextExpectedSeq, recovered_samples});
+                if (seq > nextExpectedSeq && nextExpectedSeq != 0) {
+                    std::vector<int16_t> recovered_samples(red_num_samples);
+                    for(int i=0; i<red_num_samples; ++i) {
+                        float s = red_samples_raw[i] * INBOUND_GAIN;
+                        if (s > 32767.0f) s = 32767.0f;
+                        if (s < -32768.0f) s = -32768.0f;
+                        recovered_samples[i] = static_cast<int16_t>(s);
                     }
+                    
+                    // FEC: If we are missing the exact next packet, insert the recovered one
+                    std::lock_guard<std::mutex> lock(jitterMtx);
+                    jitterBuffer.push({nextExpectedSeq, recovered_samples});
+                    
+                    // If we recovered a packet, we can potentially advance the sequence 
+                    // if we know we have everything up to now.
+                }
                 }
 
                 {
@@ -430,30 +451,53 @@ void jitter_drain_thread() {
         {
             std::lock_guard<std::mutex> lock(jitterMtx);
             if (!jitterBuffer.empty()) {
+                // --- Adaptive Jitter Logic ---
+                size_t current_threshold = adaptive_jitter_threshold.load();
+                
                 if (jitterBuffer.size() > DRIFT_THRESHOLD) {
-                    while(jitterBuffer.size() > JITTER_THRESHOLD) {
+                    // We are drifting too far ahead (buffer growing)
+                    // Drop packets to catch up
+                    while(jitterBuffer.size() > current_threshold) {
                         jitterBuffer.pop();
                     }
                     if (!jitterBuffer.empty()) {
                         nextExpectedSeq = jitterBuffer.top().sequence;
                     }
+                    // Slightly increase threshold to prevent immediate oscillation
+                    if (current_threshold < JITTER_THRESHOLD_MAX) {
+                        adaptive_jitter_threshold++;
+                    }
+                } else if (jitterBuffer.size() < 2) {
+                    // We are starving (buffer too small)
+                    // Slowly increase threshold to build a bigger safety cushion
+                    if (current_threshold < JITTER_THRESHOLD_MAX) {
+                        adaptive_jitter_threshold++;
+                    }
+                } else if (jitterBuffer.size() < current_threshold) {
+                    // Normal operation, but slightly under-buffered
+                    // No aggressive action, just maintain
                 }
+            }
+        }
 
-                if (jitterBuffer.size() >= JITTER_THRESHOLD) {
-                    AudioPacket p = jitterBuffer.top();
-                    
-                    if (p.sequence == nextExpectedSeq) {
+        // Process the buffer outside the lock to minimize contention
+        {
+            std::lock_guard<std::mutex> lock(jitterMtx);
+            if (!jitterBuffer.empty() && jitterBuffer.size() >= adaptive_jitter_threshold.load()) {
+                AudioPacket p = jitterBuffer.top();
+                
+                if (p.sequence == nextExpectedSeq) {
+                    samples_to_play = p.samples;
+                    nextExpectedSeq++;
+                    jitterBuffer.pop();
+                } else if (p.sequence < nextExpectedSeq) {
+                    jitterBuffer.pop(); // Old packet, discard
+                } else {
+                    // Gap detected (missing packet)
+                    if (jitterBuffer.size() > MAX_JITTER_SIZE) { 
                         samples_to_play = p.samples;
-                        nextExpectedSeq++;
+                        nextExpectedSeq = p.sequence + 1;
                         jitterBuffer.pop();
-                    } else if (p.sequence < nextExpectedSeq) {
-                        jitterBuffer.pop();
-                    } else {
-                        if (jitterBuffer.size() > MAX_JITTER_SIZE) { 
-                             samples_to_play = p.samples;
-                             nextExpectedSeq = p.sequence + 1;
-                             jitterBuffer.pop();
-                        }
                     }
                 }
             }
