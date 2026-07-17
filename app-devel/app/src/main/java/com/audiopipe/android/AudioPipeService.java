@@ -17,6 +17,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     public static final String ACTION_STOP = "STOP_SERVICE";
     public static final String ACTION_OPEN_APP = "OPEN_APP";
     public static final String ACTION_UPDATE_ROUTING = "UPDATE_ROUTING";
+    public static final String ACTION_UPDATE_SAMPLE_RATE = "UPDATE_SAMPLE_RATE";
     
     public enum ServiceState {
         DISCONNECTED,
@@ -38,6 +39,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
     private AudioConfig.RoutingMode routingMode = AudioConfig.RoutingMode.SPEAKERPHONE;
     private boolean useAecNr = false;
+    private int currentSampleRate = AudioConfig.SAMPLE_RATE;
 
     private ServiceState currentState = ServiceState.DISCONNECTED;
     private long lastPacketSeen = 0;
@@ -67,6 +69,14 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
             return START_STICKY;
         }
 
+        if (ACTION_UPDATE_SAMPLE_RATE.equals(intent.getAction())) {
+            if (intent.hasExtra("SAMPLE_RATE")) {
+                int newRate = intent.getIntExtra("SAMPLE_RATE", AudioConfig.SAMPLE_RATE);
+                updateSampleRate(newRate);
+            }
+            return START_STICKY;
+        }
+
         if (ACTION_OPEN_APP.equals(intent.getAction())) {
             Intent appIntent = new Intent(this, MainActivity.class);
             appIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
@@ -86,8 +96,11 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (intent.hasExtra("USE_AEC_NR")) {
             useAecNr = intent.getBooleanExtra("USE_AEC_NR", false);
         }
+        if (intent.hasExtra("SAMPLE_RATE")) {
+            currentSampleRate = intent.getIntExtra("SAMPLE_RATE", AudioConfig.SAMPLE_RATE);
+        }
 
-        Log.i(TAG, "Starting Audio Pipe Service for target: " + serverIp + ":" + serverPort + " [Mode: " + routingMode + ", AEC/NR: " + useAecNr + "]");
+        Log.i(TAG, "Starting Audio Pipe Service for target: " + serverIp + ":" + serverPort + " [Mode: " + routingMode + ", AEC/NR: " + useAecNr + ", Rate: " + currentSampleRate + "Hz]");
         
         startForegroundService();
         
@@ -112,7 +125,6 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 
                 updateState(ServiceState.CONNECTING);
                 udpReceiver.sendHandshake(serverIp, serverPort);
-                // REMOVED: udpReceiver.sendNegotiationRequest(serverIp, serverPort);
                 lastHandshakeSent = System.currentTimeMillis();
                 
                 captureEngine = new AudioCaptureEngine(this, useAecNr);
@@ -126,6 +138,21 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         }, "ServiceInitThread").start();
 
         return START_STICKY;
+    }
+
+    private void updateSampleRate(int newRate) {
+        Log.i(TAG, "Updating sample rate to " + newRate + "Hz");
+        this.currentSampleRate = newRate;
+        
+        if (playbackEngine != null) {
+            playbackEngine.updateSampleRate(newRate);
+        }
+        if (captureEngine != null) {
+            captureEngine.updateSampleRate(newRate);
+        }
+        if (udpReceiver != null) {
+            udpReceiver.sendNegotiationRequest(serverIp, serverPort, newRate);
+        }
     }
 
     private synchronized void updateState(ServiceState newState) {
@@ -167,7 +194,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
             updateState(ServiceState.CONNECTED);
             // Trigger negotiation AFTER handshake success to ensure correct session ID
             if (udpReceiver != null) {
-                udpReceiver.sendNegotiationRequest(serverIp, serverPort);
+                udpReceiver.sendNegotiationRequest(serverIp, serverPort, currentSampleRate);
             }
         } else if (type == AudioConfig.TYPE_PONG) {
             if (currentState == ServiceState.CONNECTION_LOST) {
@@ -182,10 +209,10 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         this.currentSessionId = sessionId;
         if (udpStreamer != null) {
             udpStreamer.setSessionId(sessionId);
-                if (playbackEngine != null) {
+        }
+        if (playbackEngine != null) {
             playbackEngine.resetSequence();
         }
-    }
         if (udpReceiver != null) {
             udpReceiver.setSessionId(sessionId);
         }
@@ -239,8 +266,6 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                             Log.i(TAG, "Attempting connection/reconnection...");
                             if (udpReceiver != null) {
                                 udpReceiver.sendHandshake(serverIp, serverPort);
-                                // REMOVED: udpReceiver.sendNegotiationRequest(serverIp, serverPort);
-                                // Negotiation should only happen after Handshake Response is received
                                 lastHandshakeSent = now;
                             }
                         }

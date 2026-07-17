@@ -29,4 +29,6 @@ public class AudioConfig {
     // Pref Keys
     public static final String PREF_ROUTING_MODE = "pref_routing_mode";
     public static final String PREF_AEC_NR = "pref_aec_nr";
+    public static final String PREF_SAMPLE_RATE = "pref_sample_rate";
+    public static final int[] SUPPORTED_SAMPLE_RATES = { 8000, 16000, 44100, 48000 };
 }

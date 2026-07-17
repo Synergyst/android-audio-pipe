@@ -30,6 +30,7 @@ public class MainActivity extends AppCompatActivity {
     private EditText ipInput;
     private EditText portInput;
     private android.widget.Spinner routingSpinner;
+    private android.widget.Spinner rateSpinner;
     private android.widget.CheckBox aecCheckBox;
     private Button toggleButton;
     private TextView statusText;
@@ -107,22 +108,36 @@ public class MainActivity extends AppCompatActivity {
         portInput.setText("12345");
         root.addView(portInput);
 
-        // --- Routing Settings Section ---
+        // --- Settings Section ---
         TextView settingsTitle = new TextView(this);
-        settingsTitle.setText("AUDIO ROUTING");
+        settingsTitle.setText("AUDIO SETTINGS");
         settingsTitle.setTextColor(Color.GREEN);
         settingsTitle.setGravity(Gravity.CENTER);
         settingsTitle.setPadding(0, 30, 0, 10);
         root.addView(settingsTitle);
 
+        // Routing Spinner
         routingSpinner = new android.widget.Spinner(this);
         routingSpinner.setBackgroundColor(Color.parseColor("#2C2C2C"));
         AudioConfig.RoutingMode[] modes = AudioConfig.RoutingMode.values();
-        android.widget.ArrayAdapter<AudioConfig.RoutingMode> adapter = new android.widget.ArrayAdapter<>(
+        android.widget.ArrayAdapter<AudioConfig.RoutingMode> routingAdapter = new android.widget.ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_item, modes);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        routingSpinner.setAdapter(adapter);
+        routingAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        routingSpinner.setAdapter(routingAdapter);
         root.addView(routingSpinner);
+
+        // Sample Rate Spinner
+        rateSpinner = new android.widget.Spinner(this);
+        rateSpinner.setBackgroundColor(Color.parseColor("#2C2C2C"));
+        int[] rates = AudioConfig.SUPPORTED_SAMPLE_RATES;
+        String[] rateStrings = new String[rates.length];
+        for(int i=0; i<rates.length; i++) rateStrings[i] = rates[i] + " Hz";
+        
+        android.widget.ArrayAdapter<String> rateAdapter = new android.widget.ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, rateStrings);
+        rateAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        rateSpinner.setAdapter(rateAdapter);
+        root.addView(rateSpinner);
 
         aecCheckBox = new android.widget.CheckBox(this);
         aecCheckBox.setText("Enable AEC/NR (Voice Comm Mode)");
@@ -255,12 +270,14 @@ public class MainActivity extends AppCompatActivity {
             int port = Integer.parseInt(portInput.getText().toString().trim());
             AudioConfig.RoutingMode mode = (AudioConfig.RoutingMode) routingSpinner.getSelectedItem();
             boolean useAec = aecCheckBox.isChecked();
+            int sampleRate = AudioConfig.SUPPORTED_SAMPLE_RATES[rateSpinner.getSelectedItemPosition()];
 
             Intent intent = new Intent(this, AudioPipeService.class);
             intent.putExtra("SERVER_IP", ip);
             intent.putExtra("SERVER_PORT", port);
             intent.putExtra("ROUTING_MODE", mode);
             intent.putExtra("USE_AEC_NR", useAec);
+            intent.putExtra("SAMPLE_RATE", sampleRate);
             
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 startForegroundService(intent);
@@ -299,6 +316,9 @@ public class MainActivity extends AppCompatActivity {
         int modeOrdinal = prefs.getInt(AudioConfig.PREF_ROUTING_MODE, AudioConfig.RoutingMode.SPEAKERPHONE.ordinal());
         routingSpinner.setSelection(modeOrdinal);
         
+        int rateIndex = prefs.getInt(AudioConfig.PREF_SAMPLE_RATE, 2); // Default to 44100 (index 2)
+        rateSpinner.setSelection(rateIndex);
+        
         aecCheckBox.setChecked(prefs.getBoolean(AudioConfig.PREF_AEC_NR, false));
     }
 
@@ -310,6 +330,9 @@ public class MainActivity extends AppCompatActivity {
         
         AudioConfig.RoutingMode mode = (AudioConfig.RoutingMode) routingSpinner.getSelectedItem();
         editor.putInt(AudioConfig.PREF_ROUTING_MODE, mode.ordinal());
+        
+        int rateIndex = rateSpinner.getSelectedItemPosition();
+        editor.putInt(AudioConfig.PREF_SAMPLE_RATE, rateIndex);
         
         editor.putBoolean(AudioConfig.PREF_AEC_NR, aecCheckBox.isChecked());
         editor.apply();

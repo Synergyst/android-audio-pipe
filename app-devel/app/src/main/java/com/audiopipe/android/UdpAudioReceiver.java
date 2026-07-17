@@ -58,14 +58,14 @@ public class UdpAudioReceiver implements Runnable {
         }
     }
 
-    public void sendNegotiationRequest(String ip, int port) {
+    public void sendNegotiationRequest(String ip, int port, int sampleRate) {
         if (socket == null) return;
         try {
             InetAddress address = InetAddress.getByName(ip);
-            ByteBuffer buffer = ByteBuffer.allocate(8);
+            ByteBuffer buffer = ByteBuffer.allocate(12);
             buffer.put(AudioConfig.TYPE_NEGOTIATE);
             buffer.put(currentSessionId);
-            buffer.putInt(0);
+            buffer.putInt(sampleRate);
             byte[] data = buffer.array();
             DatagramPacket packet = new DatagramPacket(data, data.length, address, port);
             socket.send(packet);

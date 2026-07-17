@@ -26,7 +26,7 @@
 const char* PHONE_IP = "192.168.168.120"; 
 const int RECV_PORT = 12345; 
 const int SEND_PORT = 12346; 
-const unsigned int SAMPLE_RATE = 44100;
+std::atomic<unsigned int> current_sample_rate{44100};
 const unsigned int CHANNELS = 1; // Match Android App (Mono)
 const size_t BUFFER_SIZE = 512;
 const float INBOUND_GAIN = 2.0f;
@@ -139,7 +139,6 @@ public:
     }
 };
 
-// Jitter Buffer Packet
 struct AudioPacket {
     uint32_t sequence;
     std::vector<int16_t> samples;
@@ -153,10 +152,9 @@ ConnectionStats stats;
 uint8_t CURRENT_SESSION[3] = {0x00, 0x00, 0x00};
 std::mutex session_mtx;
 
-AudioRingBuffer<int16_t> captureBuffer(SAMPLE_RATE * 2);
-AudioRingBuffer<int16_t> playbackBuffer(SAMPLE_RATE * 2);
+AudioRingBuffer<int16_t> captureBuffer(192000);
+AudioRingBuffer<int16_t> playbackBuffer(192000);
 
-// Jitter Buffer state
 std::priority_queue<AudioPacket, std::vector<AudioPacket>, std::greater<AudioPacket>> jitterBuffer;
 std::mutex jitterMtx;
 uint32_t nextExpectedSeq = 0;
@@ -206,12 +204,14 @@ void outbound_thread() {
     uint32_t seq = 0;
     double phase = 0.0;
     const double frequency = 440.0;
-    const double phase_increment = 2.0 * M_PI * frequency / SAMPLE_RATE;
 
     auto next_packet_time = std::chrono::steady_clock::now();
-    const std::chrono::microseconds packet_interval(1000000LL * (BUFFER_SIZE / sizeof(int16_t)) / SAMPLE_RATE);
 
     while (running) {
+        unsigned int rate = current_sample_rate.load();
+        double phase_increment = 2.0 * M_PI * frequency / rate;
+        std::chrono::microseconds packet_interval(1000000LL * (BUFFER_SIZE / sizeof(int16_t)) / rate);
+
         if (test_tone_mode) {
             for (auto& s : audio_samples) {
                 s = static_cast<int16_t>(16384.0 * std::sin(phase));
@@ -399,12 +399,8 @@ void inbound_thread() {
                         recovered_samples[i] = static_cast<int16_t>(s);
                     }
                     
-                    // FEC: If we are missing the exact next packet, insert the recovered one
                     std::lock_guard<std::mutex> lock(jitterMtx);
                     jitterBuffer.push({nextExpectedSeq, recovered_samples});
-                    
-                    // If we recovered a packet, we can potentially advance the sequence 
-                    // if we know we have everything up to now.
                 }
                 }
 
@@ -423,19 +419,28 @@ void inbound_thread() {
             pong.sequence = 0;
             sendto(sock, &pong, sizeof(PacketHeader), 0, (struct sockaddr*)&from_addr, from_len);
         } else if (header.type == TYPE_NEGOTIATE) {
-            std::cout << "\n[Inbound] Negotiation request. Confirming 44.1kHz..." << std::endl;
-            PacketHeader resp;
-            resp.type = TYPE_NEGOTIATE;
-            {
-                std::lock_guard<std::mutex> lock(session_mtx);
-                memcpy(resp.session_id, CURRENT_SESSION, 3);
+            if (len >= (ssize_t)(sizeof(PacketHeader) + 4)) {
+                uint32_t requested_rate;
+                memcpy(&requested_rate, buffer.data() + sizeof(PacketHeader), 4);
+                requested_rate = ntohl(requested_rate);
+                
+                std::cout << "\n[Inbound] Negotiation request: " << requested_rate << "Hz. Updating server..." << std::endl;
+                
+                current_sample_rate = requested_rate;
+                
+                PacketHeader resp;
+                resp.type = TYPE_NEGOTIATE;
+                {
+                    std::lock_guard<std::mutex> lock(session_mtx);
+                    memcpy(resp.session_id, CURRENT_SESSION, 3);
+                }
+                resp.sequence = 0;
+                uint32_t rate_to_send = htonl(requested_rate);
+                std::vector<uint8_t> packet(sizeof(PacketHeader) + 4);
+                memcpy(packet.data(), &resp, sizeof(PacketHeader));
+                memcpy(packet.data() + sizeof(PacketHeader), &rate_to_send, 4);
+                sendto(sock, packet.data(), packet.size(), 0, (struct sockaddr*)&from_addr, from_len);
             }
-            resp.sequence = 0;
-            uint32_t rate = htonl(SAMPLE_RATE);
-            std::vector<uint8_t> packet(sizeof(PacketHeader) + 4);
-            memcpy(packet.data(), &resp, sizeof(PacketHeader));
-            memcpy(packet.data() + sizeof(PacketHeader), &rate, 4);
-            sendto(sock, packet.data(), packet.size(), 0, (struct sockaddr*)&from_addr, from_len);
         }
     }
 
@@ -451,36 +456,26 @@ void jitter_drain_thread() {
         {
             std::lock_guard<std::mutex> lock(jitterMtx);
             if (!jitterBuffer.empty()) {
-                // --- Adaptive Jitter Logic ---
                 size_t current_threshold = adaptive_jitter_threshold.load();
                 
                 if (jitterBuffer.size() > DRIFT_THRESHOLD) {
-                    // We are drifting too far ahead (buffer growing)
-                    // Drop packets to catch up
                     while(jitterBuffer.size() > current_threshold) {
                         jitterBuffer.pop();
                     }
                     if (!jitterBuffer.empty()) {
                         nextExpectedSeq = jitterBuffer.top().sequence;
                     }
-                    // Slightly increase threshold to prevent immediate oscillation
                     if (current_threshold < JITTER_THRESHOLD_MAX) {
                         adaptive_jitter_threshold++;
                     }
                 } else if (jitterBuffer.size() < 2) {
-                    // We are starving (buffer too small)
-                    // Slowly increase threshold to build a bigger safety cushion
                     if (current_threshold < JITTER_THRESHOLD_MAX) {
                         adaptive_jitter_threshold++;
                     }
-                } else if (jitterBuffer.size() < current_threshold) {
-                    // Normal operation, but slightly under-buffered
-                    // No aggressive action, just maintain
                 }
             }
         }
 
-        // Process the buffer outside the lock to minimize contention
         {
             std::lock_guard<std::mutex> lock(jitterMtx);
             if (!jitterBuffer.empty() && jitterBuffer.size() >= adaptive_jitter_threshold.load()) {
@@ -491,9 +486,8 @@ void jitter_drain_thread() {
                     nextExpectedSeq++;
                     jitterBuffer.pop();
                 } else if (p.sequence < nextExpectedSeq) {
-                    jitterBuffer.pop(); // Old packet, discard
+                    jitterBuffer.pop(); 
                 } else {
-                    // Gap detected (missing packet)
                     if (jitterBuffer.size() > MAX_JITTER_SIZE) { 
                         samples_to_play = p.samples;
                         nextExpectedSeq = p.sequence + 1;
@@ -520,6 +514,7 @@ void monitor_thread() {
         
         std::cout << "\r" << "[Status] " 
                   << (diff != -1 && diff < 3000 ? "CONNECTED ✅" : "DISCONNECTED ❌") 
+                  << " | Rate: " << current_sample_rate.load() << "Hz"
                   << " | Pkts: " << stats.packets_received 
                   << " | Rolling Loss: " << std::fixed << std::setprecision(2) << stats.get_rolling_loss_pct() << "%"
                   << " | Latency: " << (diff == -1 || diff >= 3000 ? "N/A" : std::to_string(diff) + "ms") << " " << std::flush;
@@ -605,7 +600,7 @@ int main(int argc, char** argv) {
     ma_device_config captureConfig = ma_device_config_init(ma_device_type_capture);
     captureConfig.capture.format = ma_format_s16;
     captureConfig.capture.channels = CHANNELS;
-    captureConfig.sampleRate = SAMPLE_RATE;
+    captureConfig.sampleRate = current_sample_rate.load();
     captureConfig.dataCallback = data_capture_callback;
 
     ma_device captureDevice;
@@ -625,7 +620,7 @@ int main(int argc, char** argv) {
     ma_device_config playbackConfig = ma_device_config_init(ma_device_type_playback);
     playbackConfig.playback.format = ma_format_s16;
     playbackConfig.playback.channels = CHANNELS;
-    playbackConfig.sampleRate = SAMPLE_RATE;
+    playbackConfig.sampleRate = current_sample_rate.load();
     playbackConfig.dataCallback = playback_callback;
 
     ma_device playbackDevice;
