@@ -1,8 +1,13 @@
-// server_user.cpp — Standalone binary for standard user accounts with existing PulseAudio.
+// server_user.cpp — Standalone binary for PulseAudio audio pipe to Android.
 //
 // Auto-detects root vs standard user and adapts accordingly:
-//   - Root: starts PulseAudio if not running, sets runtime dir, creates virtual devices
-//   - Standard user: connects to existing PulseAudio, creates virtual devices
+//   - Root: starts PulseAudio if not running (with proper XDG_RUNTIME_DIR), creates virtual devices
+//   - Standard user: connects to existing PulseAudio or starts it if needed, creates virtual devices
+//
+// Works in all setups:
+//   - PulseAudio already running (user or system mode)
+//   - PulseAudio not running (starts it with correct environment)
+//   - Root or non-root user
 //
 // No bash script needed — just run the binary directly.
 
@@ -186,7 +191,8 @@ std::atomic<bool> null_mode(false);
 std::atomic<bool> test_tone_mode(false);
 ConnectionStats stats;
 std::atomic<int> g_tcp_sock{-1};  // TCP client socket fd — used by main() to unblock shutdown
-uint8_t CURRENT_SESSION[3] = {0x00, 0x00, 0x00};
+uint8_t CURRENT_SESSION[3] = {0xDE, 0xAD, 0xBE};  // Pre-seed to Android app default so pre-handshake audio packets pass the session check.
+// The real session ID is assigned during handshake and overwrites this.
 std::mutex session_mtx;
 
 AudioRingBuffer<int16_t> captureBuffer(192000);
@@ -231,54 +237,108 @@ static std::string get_pulse_server_env() {
 /**
  * Ensure PulseAudio is running and reachable.
  *
- * Root user:   Start PulseAudio if not running, set runtime dir.
- * User mode:   Connect to existing PulseAudio (error if not running).
+ * Handles all scenarios robustly:
+ *   - PA already running (user or system mode): uses existing instance
+ *   - PA not running (root): starts with proper XDG_RUNTIME_DIR set
+ *   - PA not running (non-root): tries to start, errors if it fails
+ *
+ * Key fix: XDG_RUNTIME_DIR MUST be set before PulseAudio starts, otherwise
+ * PulseAudio silently fails to create its socket directory. This is a known
+ * PulseAudio behavior — it checks XDG_RUNTIME_DIR first, and if not set,
+ * falls back to /run/user/<uid> but fails to create it due to permission
+ * checks. Setting XDG_RUNTIME_DIR explicitly resolves this.
  */
 static void ensure_pulseaudio_running() {
-    std::string rt_dir = get_runtime_dir();
-    std::string socket_path = get_pulse_socket_path(rt_dir);
-
+    // Check if PulseAudio is already running and reachable.
+    // pactl auto-discovers the socket regardless of location.
     if (pulseaudio_is_running()) {
         std::cout << "[System] PulseAudio is already running. Using existing instance." << std::endl;
 
-        // If PULSE_SERVER is not set but we're not root, PA should be on default socket.
-        // If PULSE_SERVER is set, honor it.
-        if (get_pulse_server_env().empty() && !is_root()) {
-            // PULSE_SERVER will use the default Unix socket — nothing to do.
+        // Unset DISPLAY before any pactl/libpulse calls — libpulse checks
+        // DISPLAY to decide whether to connect to X11 via D-Bus. Without
+        // this, libpulse produces "xcb_connection_has_error()" spam on headless
+        // systems where X11 is unavailable.
+        unsetenv("DISPLAY");
+
+        // Set PULSE_SERVER so all subsequent pactl/libpulse calls use the
+        // Unix socket directly, bypassing D-Bus X11 connection attempts.
+        if (get_pulse_server_env().empty()) {
+            std::string rt_dir = get_runtime_dir();
+            std::string user_socket = rt_dir + "/pulse/native";
+            struct stat st;
+            if (stat(user_socket.c_str(), &st) == 0) {
+                setenv("PULSE_SERVER", ("unix:" + user_socket).c_str(), 1);
+                std::cout << "[System] Connected to user-mode PulseAudio." << std::endl;
+            } else if (stat("/run/pulse/native", &st) == 0) {
+                setenv("PULSE_SERVER", "unix:/run/pulse/native", 1);
+                std::cout << "[System] Connected to system-mode PulseAudio." << std::endl;
+            } else {
+                std::cout << "[System] Using default PulseAudio server." << std::endl;
+            }
         }
         return;
     }
 
-    // PulseAudio is not running.
-    if (!is_root()) {
-        std::cerr << "[System] ERROR: PulseAudio is not running." << std::endl;
-        std::cerr << "[System] Please start PulseAudio first (e.g., 'pulseaudio --start') "
-                  << "or use a desktop environment that starts it automatically." << std::endl;
-        exit(1);
-    }
+    // PulseAudio is not running. We need to start it.
+    std::cout << "[System] PulseAudio is not running. Starting..." << std::endl;
 
-    // Root user: try to start PulseAudio
-    std::cout << "[System] PulseAudio is not running. Starting as root..." << std::endl;
+    uid_t uid = get_current_uid();
+
+    // Determine the runtime directory. get_runtime_dir() checks XDG_RUNTIME_DIR
+    // first, and falls back to /run/user/<uid>.
+    std::string rt_dir = get_runtime_dir();
+
+    // Ensure the runtime directory exists.
+    // /run/user must exist as a directory first.
+    mkdir("/run/user", 0755);
     mkdir(rt_dir.c_str(), 0700);
-    setenv("PULSE_RUNTIME_PATH", rt_dir.c_str(), 1);
 
-    int rc = system("pulseaudio -D --exit-idle-time=-1 2>/dev/null");
+    // CRITICAL: XDG_RUNTIME_DIR must be set before PulseAudio starts.
+    // PulseAudio uses this to determine where to create its socket directory.
+    // Without it, PulseAudio silently fails with "Permission denied" on root
+    // because it can't create the fallback directory.
+    if (getenv("XDG_RUNTIME_DIR") == nullptr || getenv("XDG_RUNTIME_DIR")[0] == '\0') {
+        setenv("XDG_RUNTIME_DIR", rt_dir.c_str(), 1);
+    }
+
+    // Unset DISPLAY to prevent PulseAudio from trying X11/XCB when no X
+    // server is available. Without this, PulseAudio produces "xcb_connection_has_error()"
+    // spam and can fail silently. This was a regression introduced when DISPLAY
+    // unsetting was removed from the startup path.
+    unsetenv("DISPLAY");
+
+    // Start PulseAudio (must be after unsetenv so the subprocess inherits the cleaned env)
+    int rc = system("DISPLAY= pulseaudio -D --exit-idle-time=-1 2>/dev/null");
     if (rc != 0) {
-        std::cerr << "[System] ERROR: Failed to start PulseAudio as root." << std::endl;
+        std::cerr << "[System] ERROR: Failed to start PulseAudio." << std::endl;
+        std::cerr << "[System] Ensure PulseAudio is installed and you have permission to start it." << std::endl;
         exit(1);
     }
 
-    // Wait for socket to appear
-    for (int i = 0; i < 10; i++) {
+    // Wait for socket to appear at the expected location.
+    std::string socket_path = rt_dir + "/pulse/native";
+    for (int i = 0; i < 30; i++) {  // 15 second timeout
         struct stat st;
         if (stat(socket_path.c_str(), &st) == 0) {
             std::cout << "[System] PulseAudio started successfully." << std::endl;
+            // Set PULSE_SERVER so all subsequent pactl/libpulse calls use the
+            // Unix socket directly, bypassing D-Bus X11 connection attempts.
+            setenv("PULSE_SERVER", ("unix:" + socket_path).c_str(), 1);
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    std::cerr << "[System] ERROR: PulseAudio started but socket not found at " << socket_path << std::endl;
+    // Last resort: check system-mode socket.
+    struct stat st_sys;
+    if (stat("/run/pulse/native", &st_sys) == 0) {
+        setenv("PULSE_SERVER", "unix:/run/pulse/native", 1);
+        std::cout << "[System] PulseAudio started in system mode." << std::endl;
+        return;
+    }
+
+    std::cerr << "[System] ERROR: PulseAudio started but socket not found." << std::endl;
+    std::cerr << "[System] Tried: " << socket_path << std::endl;
     exit(1);
 }
 
