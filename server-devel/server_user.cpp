@@ -532,8 +532,40 @@ std::string get_phone_ip() {
 }
 
 void set_phone_ip(const std::string& ip) {
-    std::lock_guard<std::mutex> lock(phoneIpMutex);
-    phoneIp = ip;
+    {
+        std::lock_guard<std::mutex> lock(phoneIpMutex);
+        phoneIp = ip;
+    }
+    // Wake up outbound thread if it's waiting for an IP
+    if (signal_pipe[1] >= 0) {
+        write(signal_pipe[1], "I", 1);
+    }
+}
+
+// Wait until a valid phone IP is set (or running becomes false).
+// Returns true if a valid IP was set, false if we should stop.
+bool wait_for_phone_ip(const std::string& default_ip) {
+    if (!default_ip.empty()) {
+        return true; // Use the default if available
+    }
+    while (running) {
+        std::lock_guard<std::mutex> lock(phoneIpMutex);
+        if (!phoneIp.empty()) {
+            return true;
+        }
+        phoneIpMutex.unlock();
+        // Use poll on signal pipe to avoid busy-spinning
+        struct pollfd pf;
+        pf.fd = signal_pipe[0];
+        pf.events = POLLIN;
+        int ret = poll(&pf, 1, 100);
+        if (ret > 0) {
+            // Drain the signal pipe
+            char buf[64];
+            while (read(signal_pipe[0], buf, sizeof(buf)) > 0) {}
+        }
+    }
+    return false;
 }
 
 // ── Outbound thread (PC -> Phone) ──────────────────────────────────────────
@@ -563,12 +595,26 @@ static void* outbound_thread_func(void* arg) {
 
     auto next_packet_time = std::chrono::steady_clock::now();
 
+    // Wait until we have a valid phone IP before sending any packets.
+    // This prevents the thread from blasting UDP to the wrong IP before the
+    // handshake arrives, which causes lost packets and sequence misalignment.
+    if (!test_tone_mode && !null_mode) {
+        wait_for_phone_ip("");
+    }
+
     while (running) {
         // Dynamically update destination IP if it changes (e.g., handshake arrives late)
         std::string current_ip = get_phone_ip();
         if (!current_ip.empty() && current_ip != last_resolved_ip) {
             inet_pton(AF_INET, current_ip.c_str(), &phone_addr.sin_addr);
             last_resolved_ip = current_ip;
+        }
+        
+        // Skip sending if we don't have a valid destination IP yet.
+        // This can happen in race conditions where the IP was cleared (e.g., disconnect).
+        if (current_ip.empty() && !test_tone_mode && !null_mode) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
         }
         unsigned int netRate = current_network_rate.load();
         if (netRate == 0) netRate = HARDWARE_SAMPLE_RATE;

@@ -197,7 +197,7 @@ public class AudioPlaybackEngine implements Runnable {
                 }
 
                 if (dataToPlay != null) {
-                    if (audioTrack != null && audioTrack.getState() == AudioTrack.STATE_INITIALIZED) {
+                    if (audioTrack != null) {
                         // Ensure track is playing — Android may silently stop playback after idle/silence periods.
                         // Calling play() on an already-playing track is a safe no-op.
                         audioTrack.play();
