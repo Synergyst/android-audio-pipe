@@ -21,40 +21,41 @@ public class AudioPlaybackEngine implements Runnable {
     private static class AudioPacket {
         int sequence;
         byte[] data;
-        AudioPacket(int sequence, byte[] data) {
+        int length;
+        AudioPacket(int sequence, byte[] data, int length) {
             this.sequence = sequence;
             this.data = data;
+            this.length = length;
         }
     }
 
-    // PriorityQueue to handle out-of-order packets
     private final PriorityQueue<AudioPacket> packetBuffer = new PriorityQueue<>(Comparator.comparingInt(p -> p.sequence));
     private final Object bufferLock = new Object();
+    private BufferPool bufferPool;
     
     private int nextExpectedSequence = -1;
-    private int currentBufferThreshold = 5; // Initial threshold
-    private final int MIN_THRESHOLD = 3;
+    private int currentBufferThreshold = 10; 
+    private final int MIN_THRESHOLD = 10;
     private final int MAX_THRESHOLD = 50;
     private final int TARGET_BUFFER_SIZE = 10;
-    private final int DRIFT_UPPER_BOUND = 25; // Drop packets if we exceed this to correct clock drift
+    private final int DRIFT_UPPER_BOUND = 25; 
     
     private final Context context;
-    private int currentSampleRate = AudioConfig.SAMPLE_RATE;
+    // Hardware rate is locked to AudioConfig.SAMPLE_RATE (44100)
+    private final int hardwareSampleRate = AudioConfig.SAMPLE_RATE;
 
-    public AudioPlaybackEngine(Context context) {
+    public AudioPlaybackEngine(Context context, BufferPool bufferPool) {
         this.context = context;
+        this.bufferPool = bufferPool;
     }
 
     public void start() {
-        startWithRate(currentSampleRate);
+        startWithRate(hardwareSampleRate);
     }
 
     public void updateSampleRate(int newRate) {
-        if (this.currentSampleRate == newRate) return;
-        Log.i(TAG, "Updating sample rate to " + newRate);
-        this.currentSampleRate = newRate;
-        stop();
-        start();
+        // Hardware remains at 44.1kHz; resampling is handled in the Service
+        Log.i(TAG, "Sample rate preference updated to " + newRate + "Hz (Network rate). Hardware remains at " + hardwareSampleRate + "Hz");
     }
 
     private void startWithRate(int rate) {
@@ -64,7 +65,7 @@ public class AudioPlaybackEngine implements Runnable {
                 AudioConfig.AUDIO_FORMAT
         );
 
-        int bufferSize = Math.max(minBufferSize, AudioConfig.BUFFER_SIZE);
+        int bufferSize = minBufferSize * 4;
 
         audioTrack = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
@@ -94,23 +95,23 @@ public class AudioPlaybackEngine implements Runnable {
         Log.i(TAG, "Audio playback engine started at " + rate + "Hz.");
     }
 
-    public void playAudio(int sequence, byte[] data, byte[] redundantData) {
+    public void playAudio(int sequence, byte[] data, int length, byte[] redundantData) {
         if (!isPlaying) return;
         
         synchronized (bufferLock) {
-            // Drop packets that are too old
             if (nextExpectedSequence != -1 && sequence < nextExpectedSequence) {
                 return; 
             }
 
-            // FEC: If we have redundant data and we're missing the previous packet, fill it in
             if (redundantData != null && nextExpectedSequence != -1 && sequence == nextExpectedSequence + 1) {
-                AudioPacket missingPacket = new AudioPacket(nextExpectedSequence, redundantData);
+                // Use BufferPool for recovered packet
+                byte[] redData = bufferPool.lease();
+                System.arraycopy(redundantData, 0, redData, 0, redundantData.length);
+                AudioPacket missingPacket = new AudioPacket(nextExpectedSequence, redData, redundantData.length);
                 packetBuffer.offer(missingPacket);
                 Log.v(TAG, "FEC: Recovered missing packet " + nextExpectedSequence);
             }
 
-            // Clock Drift Correction
             if (packetBuffer.size() > DRIFT_UPPER_BOUND) {
                 AudioPacket dropped = packetBuffer.poll();
                 if (dropped != null) {
@@ -119,7 +120,10 @@ public class AudioPlaybackEngine implements Runnable {
                 }
             }
 
-            packetBuffer.offer(new AudioPacket(sequence, data));
+            // Use BufferPool instead of fresh array
+            byte[] packetData = bufferPool.lease();
+            System.arraycopy(data, 0, packetData, 0, length);
+            packetBuffer.offer(new AudioPacket(sequence, packetData, length));
             
             if (packetBuffer.size() > MAX_THRESHOLD) {
                 currentBufferThreshold = Math.max(MIN_THRESHOLD, currentBufferThreshold - 1);
@@ -163,6 +167,7 @@ public class AudioPlaybackEngine implements Runnable {
         while (isPlaying) {
             try {
                 byte[] dataToPlay = null;
+                int lengthToPlay = 0;
                 
                 synchronized (bufferLock) {
                     if (packetBuffer.size() < currentBufferThreshold) {
@@ -173,10 +178,12 @@ public class AudioPlaybackEngine implements Runnable {
                             if (nextExpectedSequence == -1 || head.sequence == nextExpectedSequence) {
                                 AudioPacket p = packetBuffer.poll();
                                 dataToPlay = p.data;
+                                lengthToPlay = p.length;
                                 nextExpectedSequence = p.sequence + 1;
                             } else if (packetBuffer.size() > MAX_THRESHOLD) {
                                 AudioPacket p = packetBuffer.poll();
                                 dataToPlay = p.data;
+                                lengthToPlay = p.length;
                                 nextExpectedSequence = p.sequence + 1;
                                 Log.v(TAG, "Sequence gap detected, skipping to " + p.sequence);
                             }
@@ -186,10 +193,11 @@ public class AudioPlaybackEngine implements Runnable {
 
                 if (dataToPlay != null) {
                     if (audioTrack != null && audioTrack.getState() == AudioTrack.STATE_INITIALIZED) {
-                        audioTrack.write(dataToPlay, 0, dataToPlay.length);
+                        audioTrack.write(dataToPlay, 0, lengthToPlay);
                     }
+                    // Release buffer back to pool after playback
+                    bufferPool.release(dataToPlay);
                 } else {
-                    // Adaptive Buffer: If we are starving, increase threshold
                     synchronized (bufferLock) {
                         if (packetBuffer.isEmpty()) {
                             currentBufferThreshold = Math.min(MAX_THRESHOLD, currentBufferThreshold + 1);

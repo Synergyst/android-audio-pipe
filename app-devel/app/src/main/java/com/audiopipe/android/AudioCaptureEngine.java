@@ -15,7 +15,8 @@ public class AudioCaptureEngine implements Runnable {
     private AudioDataListener listener;
     private Thread captureThread;
     private boolean useAecNr;
-    private int currentSampleRate = AudioConfig.SAMPLE_RATE;
+    // Hardware rate is locked to AudioConfig.SAMPLE_RATE (44100)
+    private final int hardwareSampleRate = AudioConfig.SAMPLE_RATE;
 
     public interface AudioDataListener {
         void onAudioDataCaptured(byte[] data, int size);
@@ -27,15 +28,8 @@ public class AudioCaptureEngine implements Runnable {
     }
 
     public void updateSampleRate(int newRate) {
-        if (this.currentSampleRate == newRate) return;
-        Log.i(TAG, "Updating capture sample rate to " + newRate);
-        this.currentSampleRate = newRate;
-        stop();
-        try {
-            start();
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to restart capture with new rate: " + e.getMessage());
-        }
+        // Hardware remains at 44.1kHz; resampling is handled in the Service
+        Log.i(TAG, "Sample rate preference updated to " + newRate + "Hz (Network rate). Hardware remains at " + hardwareSampleRate + "Hz");
     }
 
     public void updateAecNr(boolean enabled) {
@@ -51,7 +45,7 @@ public class AudioCaptureEngine implements Runnable {
 
     public void start() throws IOException {
         int minBufferSize = AudioRecord.getMinBufferSize(
-                currentSampleRate, 
+                hardwareSampleRate, 
                 AudioConfig.CHANNEL_CONFIG, 
                 AudioConfig.AUDIO_FORMAT
         );
@@ -65,7 +59,7 @@ public class AudioCaptureEngine implements Runnable {
 
         audioRecord = new AudioRecord(
                 audioSource,
-                currentSampleRate,
+                hardwareSampleRate,
                 AudioConfig.CHANNEL_CONFIG,
                 AudioConfig.AUDIO_FORMAT,
                 bufferSize
@@ -81,7 +75,7 @@ public class AudioCaptureEngine implements Runnable {
         captureThread = new Thread(this);
         captureThread.setPriority(Thread.MAX_PRIORITY);
         captureThread.start();
-        Log.i(TAG, "Audio capture started (Rate: " + currentSampleRate + ", Source: " + audioSource + ", AEC/NR: " + useAecNr + ").");
+        Log.i(TAG, "Audio capture started (Rate: " + hardwareSampleRate + ", Source: " + audioSource + ", AEC/NR: " + useAecNr + ").");
     }
 
     public void stop() {

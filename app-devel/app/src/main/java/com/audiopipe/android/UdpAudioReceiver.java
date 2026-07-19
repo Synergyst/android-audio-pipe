@@ -15,6 +15,7 @@ public class UdpAudioReceiver implements Runnable {
     private boolean isListening = false;
     private AudioReceiverListener listener;
     private byte[] currentSessionId = AudioConfig.SESSION_ID;
+    private BufferPool bufferPool;
     
     public interface AudioReceiverListener {
         void onAudioDataReceived(int sequence, byte[] data, byte[] redundantData);
@@ -23,9 +24,10 @@ public class UdpAudioReceiver implements Runnable {
         void onNegotiationComplete(int sampleRate);
     }
 
-    public UdpAudioReceiver(int port, AudioReceiverListener listener) {
+    public UdpAudioReceiver(int port, AudioReceiverListener listener, BufferPool bufferPool) {
         this.port = port;
         this.listener = listener;
+        this.bufferPool = bufferPool;
     }
 
     public void setSessionId(byte[] sessionId) {
@@ -65,6 +67,7 @@ public class UdpAudioReceiver implements Runnable {
             ByteBuffer buffer = ByteBuffer.allocate(12);
             buffer.put(AudioConfig.TYPE_NEGOTIATE);
             buffer.put(currentSessionId);
+            buffer.putInt(0); // Sequence number (required by server PacketHeader)
             buffer.putInt(sampleRate);
             byte[] data = buffer.array();
             DatagramPacket packet = new DatagramPacket(data, data.length, address, port);
@@ -108,15 +111,17 @@ public class UdpAudioReceiver implements Runnable {
 
                 int sequence = bb.getInt();
 
-                if (listener != null) {
-                    listener.onPacketReceived(type, sequence);
-                }
-
                 if (type == AudioConfig.TYPE_HANDSHAKE_RESP) {
                     if (listener != null) {
                         listener.onSessionAssigned(session);
                     }
-                } else if (type == AudioConfig.TYPE_NEGOTIATE) {
+                }
+
+                if (listener != null) {
+                    listener.onPacketReceived(type, sequence);
+                }
+
+                if (type == AudioConfig.TYPE_NEGOTIATE) {
                     if (length >= 12) {
                         byte[] rateBytes = new byte[4];
                         bb.get(rateBytes);
@@ -126,19 +131,19 @@ public class UdpAudioReceiver implements Runnable {
                         }
                     }
                 } else if (type == AudioConfig.TYPE_AUDIO) {
-                    // FIX: Use the constant BUFFER_SIZE instead of dividing length by 2
+                    // Use BufferPool instead of allocating new byte arrays
                     int availableData = length - 8;
                     int currentLen = Math.min(availableData, AudioConfig.BUFFER_SIZE);
                     
-                    byte[] audioPayload = new byte[currentLen];
-                    bb.get(audioPayload);
+                    byte[] audioPayload = bufferPool.lease();
+                    bb.get(audioPayload, 0, currentLen);
                     
                     byte[] redundantPayload = null;
                     int remainingData = availableData - currentLen;
                     if (remainingData > 0) {
                         int redLen = Math.min(remainingData, AudioConfig.BUFFER_SIZE);
-                        redundantPayload = new byte[redLen];
-                        bb.get(redundantPayload);
+                        redundantPayload = bufferPool.lease();
+                        bb.get(redundantPayload, 0, redLen);
                     }
                     
                     if (listener != null) {

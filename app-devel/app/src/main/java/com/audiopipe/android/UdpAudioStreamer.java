@@ -18,6 +18,9 @@ public class UdpAudioStreamer {
     private byte[] sessionId = AudioConfig.SESSION_ID;
     private byte[] lastPayload = null;
 
+    // Pre-allocated buffer to avoid GC churn in sendPacket
+    private ByteBuffer packetBuffer = ByteBuffer.allocate(4096);
+
     public void setSessionId(byte[] newSessionId) {
         if (newSessionId != null) {
             this.sessionId = newSessionId;
@@ -34,52 +37,56 @@ public class UdpAudioStreamer {
 
     public void sendHandshake() {
         if (!isStreaming || socket == null) return;
-        sendPacket(AudioConfig.TYPE_HANDSHAKE_REQ, new byte[0]);
+        sendPacket(AudioConfig.TYPE_HANDSHAKE_REQ, null, 0);
         Log.i(TAG, "Handshake request sent.");
     }
 
     public void sendPing() {
         if (!isStreaming || socket == null) return;
-        sendPacket(AudioConfig.TYPE_PING, new byte[0]);
+        sendPacket(AudioConfig.TYPE_PING, null, 0);
     }
 
-    public void sendAudio(byte[] audioData) {
+    public void sendAudio(byte[] audioData, int length) {
         if (!isStreaming || socket == null) return;
-        sendPacket(AudioConfig.TYPE_AUDIO, audioData);
+        sendPacket(AudioConfig.TYPE_AUDIO, audioData, length);
     }
 
-    private void sendPacket(byte type, byte[] payload) {
+    private void sendPacket(byte type, byte[] payload, int payloadLen) {
         try {
-            // Header: type (1) + session_id (3) + sequence (4) = 8 bytes
-            // We append the previous payload for FEC: [Header][CurrentPayload][PreviousPayload]
-            int payloadLen = (payload != null) ? payload.length : 0;
             int redundantLen = (lastPayload != null) ? lastPayload.length : 0;
+            int totalSize = 8 + payloadLen + redundantLen;
+
+            if (totalSize > packetBuffer.capacity()) {
+                packetBuffer = ByteBuffer.allocate(totalSize * 2);
+            }
+
+            packetBuffer.clear();
+            packetBuffer.put(type);
+            packetBuffer.put(sessionId);
+            packetBuffer.putInt(sequenceNumber++);
             
-            ByteBuffer buffer = ByteBuffer.allocate(8 + payloadLen + redundantLen);
-            buffer.put(type);
-            buffer.put(sessionId);
-            buffer.putInt(sequenceNumber++);
-            
-            if (payload != null) {
-                buffer.put(payload);
+            if (payload != null && payloadLen > 0) {
+                packetBuffer.put(payload, 0, payloadLen);
             }
             if (lastPayload != null) {
-                buffer.put(lastPayload);
+                packetBuffer.put(lastPayload);
             }
             
-            byte[] packetData = buffer.array();
+            byte[] packetData = packetBuffer.array();
             DatagramPacket packet = new DatagramPacket(
                 packetData, 
-                packetData.length, 
+                totalSize, 
                 serverAddress, 
                 serverPort
             );
             
             socket.send(packet);
             
-            // Store current payload for next packet's FEC
-            if (payload != null) {
-                lastPayload = payload;
+            if (payload != null && payloadLen > 0) {
+                // Store current payload for next packet's FEC
+                // Note: We still allocate this once per packet, but it's smaller than the full packet buffer
+                lastPayload = new byte[payloadLen];
+                System.arraycopy(payload, 0, lastPayload, 0, payloadLen);
             }
         } catch (IOException e) {
             Log.e(TAG, "Error sending UDP packet: " + e.getMessage());
@@ -88,7 +95,7 @@ public class UdpAudioStreamer {
 
     public void sendDisconnect() {
         if (!isStreaming || socket == null) return;
-        sendPacket(AudioConfig.TYPE_DISCONNECT, new byte[0]);
+        sendPacket(AudioConfig.TYPE_DISCONNECT, null, 0);
         Log.i(TAG, "Disconnect packet sent.");
     }
 

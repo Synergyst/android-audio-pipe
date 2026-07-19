@@ -31,6 +31,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private UdpAudioReceiver udpReceiver;
     private AudioPlaybackEngine playbackEngine;
     private TcpControlServer controlServer;
+    private BufferPool bufferPool;
     
     private String serverIp = "192.168.168.12"; 
     private int serverPort = 12345;
@@ -39,7 +40,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
     private AudioConfig.RoutingMode routingMode = AudioConfig.RoutingMode.SPEAKERPHONE;
     private boolean useAecNr = false;
-    private int currentSampleRate = AudioConfig.SAMPLE_RATE;
+    private int currentNetworkSampleRate = AudioConfig.SAMPLE_RATE;
 
     private ServiceState currentState = ServiceState.DISCONNECTED;
     private long lastPacketSeen = 0;
@@ -48,6 +49,15 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private static final long CONNECTION_TIMEOUT_MS = 5000; // 5 seconds
     private static final long RECONNECT_INTERVAL_MS = 5000; // 5 seconds
     private byte[] currentSessionId = AudioConfig.SESSION_ID;
+
+    // TRUE ZERO-ALLOCATION BUFFERS
+    private static final int MAX_BUF_SIZE = 16384;
+    private byte[] captureResampleBuffer = new byte[MAX_BUF_SIZE];
+    private byte[] playbackResampleBuffer = new byte[MAX_BUF_SIZE];
+    private byte[] playbackRedundantBuffer = new byte[MAX_BUF_SIZE];
+    private short[] captureShortBuffer = new short[MAX_BUF_SIZE / 2];
+    private short[] playbackShortBuffer = new short[MAX_BUF_SIZE / 2];
+    private short[] playbackRedundantShortBuffer = new short[MAX_BUF_SIZE / 2];
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -72,7 +82,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (ACTION_UPDATE_SAMPLE_RATE.equals(intent.getAction())) {
             if (intent.hasExtra("SAMPLE_RATE")) {
                 int newRate = intent.getIntExtra("SAMPLE_RATE", AudioConfig.SAMPLE_RATE);
-                updateSampleRate(newRate);
+                new Thread(() -> updateNetworkSampleRate(newRate), "SampleRateUpdateThread").start();
             }
             return START_STICKY;
         }
@@ -97,10 +107,10 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
             useAecNr = intent.getBooleanExtra("USE_AEC_NR", false);
         }
         if (intent.hasExtra("SAMPLE_RATE")) {
-            currentSampleRate = intent.getIntExtra("SAMPLE_RATE", AudioConfig.SAMPLE_RATE);
+            currentNetworkSampleRate = intent.getIntExtra("SAMPLE_RATE", AudioConfig.SAMPLE_RATE);
         }
 
-        Log.i(TAG, "Starting Audio Pipe Service for target: " + serverIp + ":" + serverPort + " [Mode: " + routingMode + ", AEC/NR: " + useAecNr + ", Rate: " + currentSampleRate + "Hz]");
+        Log.i(TAG, "Starting Audio Pipe Service for target: " + serverIp + ":" + serverPort + " [Mode: " + routingMode + ", AEC/NR: " + useAecNr + ", NetRate: " + currentNetworkSampleRate + "Hz]");
         
         startForegroundService();
         
@@ -109,17 +119,17 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 Log.i(TAG, "Initializing components...");
                 RootOptimizer.optimizeSystem();
                 
-                playbackEngine = new AudioPlaybackEngine(this);
+                bufferPool = new BufferPool(100, AudioConfig.BUFFER_SIZE);
+                playbackEngine = new AudioPlaybackEngine(this, bufferPool);
                 configureAudioRouting();
                 playbackEngine.start();
                 
                 udpStreamer = new UdpAudioStreamer();
                 udpStreamer.start(serverIp, serverPort);
                 
-                udpReceiver = new UdpAudioReceiver(localListenPort, this);
+                udpReceiver = new UdpAudioReceiver(localListenPort, this, bufferPool);
                 udpReceiver.start();
                 
-                // Start TCP Control Server for reliable command delivery
                 controlServer = new TcpControlServer(controlPort, this);
                 controlServer.start();
                 
@@ -140,9 +150,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         return START_STICKY;
     }
 
-    private void updateSampleRate(int newRate) {
-        Log.i(TAG, "Updating sample rate to " + newRate + "Hz");
-        this.currentSampleRate = newRate;
+    private void updateNetworkSampleRate(int newRate) {
+        Log.i(TAG, "Updating network sample rate to " + newRate + "Hz");
+        this.currentNetworkSampleRate = newRate;
         
         if (playbackEngine != null) {
             playbackEngine.updateSampleRate(newRate);
@@ -150,6 +160,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (captureEngine != null) {
             captureEngine.updateSampleRate(newRate);
         }
+        
         if (udpReceiver != null) {
             udpReceiver.sendNegotiationRequest(serverIp, serverPort, newRate);
         }
@@ -174,14 +185,35 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     @Override
     public void onAudioDataCaptured(byte[] data, int size) {
         if (udpStreamer != null && currentState == ServiceState.CONNECTED) {
-            udpStreamer.sendAudio(data);
+            // TRUE ZERO-ALLOCATION: Resample into pre-allocated buffer using pre-allocated shorts
+            int actualLen = AudioResampler.resample(data, 0, size, captureShortBuffer, captureResampleBuffer, AudioConfig.SAMPLE_RATE, currentNetworkSampleRate);
+            udpStreamer.sendAudio(captureResampleBuffer, actualLen);
         }
     }
 
     @Override
     public void onAudioDataReceived(int sequence, byte[] data, byte[] redundantData) {
         if (playbackEngine != null) {
-            playbackEngine.playAudio(sequence, data, redundantData);
+            // TRUE ZERO-ALLOCATION: Resample into pre-allocated buffer using pre-allocated shorts
+            int actualLen = AudioResampler.resample(data, 0, data.length, playbackShortBuffer, playbackResampleBuffer, currentNetworkSampleRate, AudioConfig.SAMPLE_RATE);
+            
+            byte[] resampledRedundant = null;
+            if (redundantData != null) {
+                int redLen = AudioResampler.resample(redundantData, 0, redundantData.length, playbackRedundantShortBuffer, playbackRedundantBuffer, currentNetworkSampleRate, AudioConfig.SAMPLE_RATE);
+                
+                // Use BufferPool instead of allocating new byte array
+                resampledRedundant = bufferPool.lease();
+                System.arraycopy(playbackRedundantBuffer, 0, resampledRedundant, 0, redLen);
+            }
+            
+            // PlaybackEngine.playAudio must handle the length of the buffer
+            playbackEngine.playAudio(sequence, playbackResampleBuffer, actualLen, resampledRedundant);
+            
+            // Release original buffers back to pool
+            bufferPool.release(data);
+            if (redundantData != null) {
+                bufferPool.release(redundantData);
+            }
         }
     }
 
@@ -192,9 +224,8 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (type == AudioConfig.TYPE_HANDSHAKE_RESP) {
             Log.i(TAG, "Handshake response received! Connection established.");
             updateState(ServiceState.CONNECTED);
-            // Trigger negotiation AFTER handshake success to ensure correct session ID
             if (udpReceiver != null) {
-                udpReceiver.sendNegotiationRequest(serverIp, serverPort, currentSampleRate);
+                udpReceiver.sendNegotiationRequest(serverIp, serverPort, currentNetworkSampleRate);
             }
         } else if (type == AudioConfig.TYPE_PONG) {
             if (currentState == ServiceState.CONNECTION_LOST) {
@@ -221,6 +252,8 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     @Override
     public void onNegotiationComplete(int sampleRate) {
         Log.i(TAG, "Negotiated sample rate: " + sampleRate + "Hz");
+        this.currentNetworkSampleRate = sampleRate;
+        
         if (playbackEngine != null) {
             playbackEngine.updateSampleRate(sampleRate);
         }
@@ -252,14 +285,12 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
         updateNotification();
         
-        // Start connection monitor and retry timer
         new Thread(() -> {
             while (true) {
                 try {
                     Thread.sleep(1000);
                     long now = System.currentTimeMillis();
 
-                    // 1. Handle Initial Connection / Reconnection attempts
                     if (currentState == ServiceState.CONNECTING || currentState == ServiceState.CONNECTION_LOST) {
                         long interval = (currentState == ServiceState.CONNECTING) ? HANDSHAKE_RETRY_INTERVAL : RECONNECT_INTERVAL_MS;
                         if (now - lastHandshakeSent > interval) {
@@ -271,7 +302,6 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                         }
                     }
 
-                    // 2. Monitor for Connection Loss (Heartbeat)
                     if (currentState == ServiceState.CONNECTED) {
                         if (udpStreamer != null) {
                             udpStreamer.sendPing();
@@ -345,7 +375,6 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         }
     }
 
-    // Control methods for TCP server
     public void setRoutingMode(AudioConfig.RoutingMode mode) {
         this.routingMode = mode;
         configureAudioRouting();

@@ -26,7 +26,8 @@
 const char* PHONE_IP = "192.168.168.120"; 
 const int RECV_PORT = 12345; 
 const int SEND_PORT = 12346; 
-std::atomic<unsigned int> current_sample_rate{44100};
+const unsigned int HARDWARE_SAMPLE_RATE = 44100;
+std::atomic<unsigned int> current_network_rate{44100};
 const unsigned int CHANNELS = 1; // Match Android App (Mono)
 const size_t BUFFER_SIZE = 512;
 const float INBOUND_GAIN = 2.0f;
@@ -166,6 +167,30 @@ const size_t MAX_JITTER_SIZE = 50;
 
 std::atomic<size_t> adaptive_jitter_threshold{5};
 
+// Simple linear resampler
+std::vector<int16_t> resample(const std::vector<int16_t>& input, unsigned int srcRate, unsigned int dstRate) {
+    if (dstRate == 0 || srcRate == dstRate) return input;
+
+    double ratio = (double)srcRate / dstRate;
+    size_t outputLength = (size_t)(input.size() / ratio);
+    std::vector<int16_t> output(outputLength);
+
+    for (size_t i = 0; i < outputLength; ++i) {
+        double position = i * ratio;
+        size_t index = (size_t)position;
+        double fraction = position - index;
+
+        if (index + 1 < input.size()) {
+            output[i] = (int16_t)((1.0 - fraction) * input[index] + fraction * input[index + 1]);
+        } else if (index < input.size()) {
+            output[i] = input[index];
+        } else {
+            output[i] = 0;
+        }
+    }
+    return output;
+}
+
 void data_capture_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     if (null_mode) return;
     const int16_t* input = (const int16_t*)pInput;
@@ -199,7 +224,7 @@ void outbound_thread() {
     phone_addr.sin_port = htons(SEND_PORT);
     inet_pton(AF_INET, PHONE_IP, &phone_addr.sin_addr);
 
-    std::vector<int16_t> audio_samples(BUFFER_SIZE / sizeof(int16_t));
+    std::vector<int16_t> network_samples(BUFFER_SIZE / sizeof(int16_t));
     std::vector<uint8_t> last_payload;
     uint32_t seq = 0;
     double phase = 0.0;
@@ -208,26 +233,45 @@ void outbound_thread() {
     auto next_packet_time = std::chrono::steady_clock::now();
 
     while (running) {
-        unsigned int rate = current_sample_rate.load();
-        double phase_increment = 2.0 * M_PI * frequency / rate;
-        std::chrono::microseconds packet_interval(1000000LL * (BUFFER_SIZE / sizeof(int16_t)) / rate);
+        unsigned int netRate = current_network_rate.load();
+        if (netRate == 0) netRate = HARDWARE_SAMPLE_RATE; // Guard against division by zero
+        double phase_increment = 2.0 * M_PI * frequency / HARDWARE_SAMPLE_RATE;
+        std::chrono::microseconds packet_interval(1000000LL * (BUFFER_SIZE / sizeof(int16_t)) / netRate);
 
         if (test_tone_mode) {
-            for (auto& s : audio_samples) {
+            // Generate exactly the number of hardware samples needed for one network packet
+            size_t needed_hw_samples = (size_t)((BUFFER_SIZE / sizeof(int16_t)) * ((double)HARDWARE_SAMPLE_RATE / netRate));
+            std::vector<int16_t> hw_samples(needed_hw_samples);
+            
+            for (auto& s : hw_samples) {
                 s = static_cast<int16_t>(16384.0 * std::sin(phase));
                 phase += phase_increment;
                 if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
             }
+            network_samples = resample(hw_samples, HARDWARE_SAMPLE_RATE, netRate);
+            if (network_samples.size() > (BUFFER_SIZE / sizeof(int16_t))) {
+                network_samples.resize(BUFFER_SIZE / sizeof(int16_t));
+            }
             std::this_thread::sleep_until(next_packet_time);
             next_packet_time += packet_interval;
         } else if (!null_mode) {
-            if (captureBuffer.available_to_read() < audio_samples.size()) {
+            // Calculate how many hardware samples we need to produce one network packet
+            size_t needed_hw_samples = (size_t)((BUFFER_SIZE / sizeof(int16_t)) * ((double)HARDWARE_SAMPLE_RATE / netRate));
+            
+            if (captureBuffer.available_to_read() < needed_hw_samples) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
-            captureBuffer.read(audio_samples.data(), audio_samples.size());
+            
+            std::vector<int16_t> hw_samples(needed_hw_samples);
+            captureBuffer.read(hw_samples.data(), needed_hw_samples);
+            network_samples = resample(hw_samples, HARDWARE_SAMPLE_RATE, netRate);
+            
+            if (network_samples.size() > (BUFFER_SIZE / sizeof(int16_t))) {
+                network_samples.resize(BUFFER_SIZE / sizeof(int16_t));
+            }
         } else {
-            std::fill(audio_samples.begin(), audio_samples.end(), 0);
+            std::fill(network_samples.begin(), network_samples.end(), 0);
             std::this_thread::sleep_until(next_packet_time);
             next_packet_time += packet_interval;
         }
@@ -240,12 +284,12 @@ void outbound_thread() {
         }
         header.sequence = htonl(seq++);
 
-        size_t current_payload_size = audio_samples.size() * sizeof(int16_t);
+        size_t current_payload_size = network_samples.size() * sizeof(int16_t);
         size_t redundant_payload_size = last_payload.size();
 
         std::vector<uint8_t> packet(sizeof(PacketHeader) + current_payload_size + redundant_payload_size);
         memcpy(packet.data(), &header, sizeof(PacketHeader));
-        memcpy(packet.data() + sizeof(PacketHeader), audio_samples.data(), current_payload_size);
+        memcpy(packet.data() + sizeof(PacketHeader), network_samples.data(), current_payload_size);
         if (redundant_payload_size > 0) {
             memcpy(packet.data() + sizeof(PacketHeader) + current_payload_size, last_payload.data(), redundant_payload_size);
         }
@@ -253,8 +297,8 @@ void outbound_thread() {
         sendto(sock, packet.data(), packet.size(), 0, (struct sockaddr*)&phone_addr, sizeof(phone_addr));
         
         last_payload.assign(
-            reinterpret_cast<uint8_t*>(audio_samples.data()), 
-            reinterpret_cast<uint8_t*>(audio_samples.data()) + current_payload_size
+            reinterpret_cast<uint8_t*>(network_samples.data()), 
+            reinterpret_cast<uint8_t*>(network_samples.data()) + current_payload_size
         );
     }
 
@@ -374,14 +418,13 @@ void inbound_thread() {
                 
                 int16_t* samples_raw = reinterpret_cast<int16_t*>(audio_ptr);
                 int num_samples = current_payload_len / sizeof(int16_t);
-                std::vector<int16_t> current_samples(num_samples);
-                
+                std::vector<int16_t> net_samples(num_samples);
                 for (int i = 0; i < num_samples; ++i) {
-                    float sample = samples_raw[i] * INBOUND_GAIN;
-                    if (sample > 32767.0f) sample = 32767.0f;
-                    if (sample < -32768.0f) sample = -32768.0f;
-                    current_samples[i] = static_cast<int16_t>(sample);
+                    net_samples[i] = samples_raw[i];
                 }
+
+                unsigned int netRate = current_network_rate.load();
+                std::vector<int16_t> hw_samples = resample(net_samples, netRate, HARDWARE_SAMPLE_RATE);
 
                 size_t redundant_offset = sizeof(PacketHeader) + current_payload_len;
                 if (redundant_offset < available_payload) {
@@ -391,13 +434,9 @@ void inbound_thread() {
                     int red_num_samples = red_len / sizeof(int16_t);
                     
                 if (seq > nextExpectedSeq && nextExpectedSeq != 0) {
-                    std::vector<int16_t> recovered_samples(red_num_samples);
-                    for(int i=0; i<red_num_samples; ++i) {
-                        float s = red_samples_raw[i] * INBOUND_GAIN;
-                        if (s > 32767.0f) s = 32767.0f;
-                        if (s < -32768.0f) s = -32768.0f;
-                        recovered_samples[i] = static_cast<int16_t>(s);
-                    }
+                    std::vector<int16_t> red_net_samples(red_num_samples);
+                    for(int i=0; i<red_num_samples; ++i) red_net_samples[i] = red_samples_raw[i];
+                    std::vector<int16_t> recovered_samples = resample(red_net_samples, netRate, HARDWARE_SAMPLE_RATE);
                     
                     std::lock_guard<std::mutex> lock(jitterMtx);
                     jitterBuffer.push({nextExpectedSeq, recovered_samples});
@@ -406,7 +445,7 @@ void inbound_thread() {
 
                 {
                     std::lock_guard<std::mutex> lock(jitterMtx);
-                    jitterBuffer.push({seq, current_samples});
+                    jitterBuffer.push({seq, hw_samples});
                 }
             }
         } else if (header.type == TYPE_PING) {
@@ -424,9 +463,14 @@ void inbound_thread() {
                 memcpy(&requested_rate, buffer.data() + sizeof(PacketHeader), 4);
                 requested_rate = ntohl(requested_rate);
                 
+                if (requested_rate == 0 || requested_rate > 192000) {
+                    std::cerr << "\n[Inbound] Rejected invalid negotiation request: " << requested_rate << "Hz" << std::endl;
+                    continue;
+                }
+
                 std::cout << "\n[Inbound] Negotiation request: " << requested_rate << "Hz. Updating server..." << std::endl;
                 
-                current_sample_rate = requested_rate;
+                current_network_rate = requested_rate;
                 
                 PacketHeader resp;
                 resp.type = TYPE_NEGOTIATE;
@@ -514,7 +558,7 @@ void monitor_thread() {
         
         std::cout << "\r" << "[Status] " 
                   << (diff != -1 && diff < 3000 ? "CONNECTED ✅" : "DISCONNECTED ❌") 
-                  << " | Rate: " << current_sample_rate.load() << "Hz"
+                  << " | NetRate: " << current_network_rate.load() << "Hz"
                   << " | Pkts: " << stats.packets_received 
                   << " | Rolling Loss: " << std::fixed << std::setprecision(2) << stats.get_rolling_loss_pct() << "%"
                   << " | Latency: " << (diff == -1 || diff >= 3000 ? "N/A" : std::to_string(diff) + "ms") << " " << std::flush;
@@ -600,7 +644,7 @@ int main(int argc, char** argv) {
     ma_device_config captureConfig = ma_device_config_init(ma_device_type_capture);
     captureConfig.capture.format = ma_format_s16;
     captureConfig.capture.channels = CHANNELS;
-    captureConfig.sampleRate = current_sample_rate.load();
+    captureConfig.sampleRate = HARDWARE_SAMPLE_RATE;
     captureConfig.dataCallback = data_capture_callback;
 
     ma_device captureDevice;
@@ -620,7 +664,7 @@ int main(int argc, char** argv) {
     ma_device_config playbackConfig = ma_device_config_init(ma_device_type_playback);
     playbackConfig.playback.format = ma_format_s16;
     playbackConfig.playback.channels = CHANNELS;
-    playbackConfig.sampleRate = current_sample_rate.load();
+    playbackConfig.sampleRate = HARDWARE_SAMPLE_RATE;
     playbackConfig.dataCallback = playback_callback;
 
     ma_device playbackDevice;

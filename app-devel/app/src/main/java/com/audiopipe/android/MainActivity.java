@@ -137,6 +137,21 @@ public class MainActivity extends AppCompatActivity {
                 this, android.R.layout.simple_spinner_item, rateStrings);
         rateAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         rateSpinner.setAdapter(rateAdapter);
+        rateSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(android.widget.AdapterView<?> parent, android.view.View view, int position, long id) {
+                if (isServiceRunning) {
+                    int selectedRate = AudioConfig.SUPPORTED_SAMPLE_RATES[position];
+                    Intent intent = new Intent(MainActivity.this, AudioPipeService.class);
+                    intent.setAction("UPDATE_SAMPLE_RATE");
+                    intent.putExtra("SAMPLE_RATE", selectedRate);
+                    startService(intent);
+                    Log.i(TAG, "UI: Requested sample rate update to " + selectedRate + "Hz");
+                }
+            }
+            @Override
+            public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
         root.addView(rateSpinner);
 
         aecCheckBox = new android.widget.CheckBox(this);
@@ -218,7 +233,7 @@ public class MainActivity extends AppCompatActivity {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 performAsyncRootCheck();
             } else {
-                statusText.setText("PERMISSION DENIED\\nMicrophone access is required.");
+                statusText.setText("PERMISSION DENIED\\nMicroHone access is required.");
                 statusText.setTextColor(Color.RED);
                 settingsButton.setVisibility(View.VISIBLE);
             }
@@ -316,7 +331,7 @@ public class MainActivity extends AppCompatActivity {
         int modeOrdinal = prefs.getInt(AudioConfig.PREF_ROUTING_MODE, AudioConfig.RoutingMode.SPEAKERPHONE.ordinal());
         routingSpinner.setSelection(modeOrdinal);
         
-        int rateIndex = prefs.getInt(AudioConfig.PREF_SAMPLE_RATE, 2); // Default to 44100 (index 2)
+        int rateIndex = prefs.getInt(AudioConfig.PREF_SAMPLE_RATE, 0); // Default to 8000 (index 0)
         rateSpinner.setSelection(rateIndex);
         
         aecCheckBox.setChecked(prefs.getBoolean(AudioConfig.PREF_AEC_NR, false));
