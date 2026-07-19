@@ -232,7 +232,11 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
     @Override
     public void onPacketReceived(byte type, int sequence) {
-        lastPacketSeen = System.currentTimeMillis();
+        // Only update lastPacketSeen on actual audio packets — ping/pong/handshake
+        // responses would give a false sense of a live audio connection.
+        if (type == AudioConfig.TYPE_AUDIO) {
+            lastPacketSeen = System.currentTimeMillis();
+        }
         
         if (type == AudioConfig.TYPE_HANDSHAKE_RESP) {
             Log.i(TAG, "Handshake response received! Connection established.");

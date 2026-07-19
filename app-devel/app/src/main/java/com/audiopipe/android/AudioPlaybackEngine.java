@@ -34,7 +34,7 @@ public class AudioPlaybackEngine implements Runnable {
     private BufferPool bufferPool;
     
     private int nextExpectedSequence = -1;
-    private int currentBufferThreshold = 10; 
+    private int currentBufferThreshold = 2; 
     private final int MIN_THRESHOLD = 10;
     private final int MAX_THRESHOLD = 50;
     private final int TARGET_BUFFER_SIZE = 10;
