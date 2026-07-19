@@ -131,18 +131,19 @@ public class UdpAudioReceiver implements Runnable {
                         }
                     }
                 } else if (type == AudioConfig.TYPE_AUDIO) {
-                    // Use BufferPool instead of allocating new byte arrays
+                    // Audio data can be up to 16KB (with FEC redundancy), so we must
+                    // allocate properly-sized buffers instead of using the 512-byte BufferPool.
                     int availableData = length - 8;
                     int currentLen = Math.min(availableData, AudioConfig.BUFFER_SIZE);
                     
-                    byte[] audioPayload = bufferPool.lease();
+                    byte[] audioPayload = new byte[currentLen];
                     bb.get(audioPayload, 0, currentLen);
                     
                     byte[] redundantPayload = null;
                     int remainingData = availableData - currentLen;
                     if (remainingData > 0) {
                         int redLen = Math.min(remainingData, AudioConfig.BUFFER_SIZE);
-                        redundantPayload = bufferPool.lease();
+                        redundantPayload = new byte[redLen];
                         bb.get(redundantPayload, 0, redLen);
                     }
                     

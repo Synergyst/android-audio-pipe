@@ -104,8 +104,9 @@ public class AudioPlaybackEngine implements Runnable {
             }
 
             if (redundantData != null && nextExpectedSequence != -1 && sequence == nextExpectedSequence + 1) {
-                // Use BufferPool for recovered packet
-                byte[] redData = bufferPool.lease();
+                // Must allocate a new buffer: redundant data can be up to 16KB
+                // (BufferPool only has 512-byte buffers, far too small)
+                byte[] redData = new byte[redundantData.length];
                 System.arraycopy(redundantData, 0, redData, 0, redundantData.length);
                 AudioPacket missingPacket = new AudioPacket(nextExpectedSequence, redData, redundantData.length);
                 packetBuffer.offer(missingPacket);
@@ -120,8 +121,9 @@ public class AudioPlaybackEngine implements Runnable {
                 }
             }
 
-            // Use BufferPool instead of fresh array
-            byte[] packetData = bufferPool.lease();
+            // Must allocate a new buffer: audio packets can be up to ~16KB
+            // (BufferPool only has 512-byte buffers, far too small for audio data)
+            byte[] packetData = new byte[length];
             System.arraycopy(data, 0, packetData, 0, length);
             packetBuffer.offer(new AudioPacket(sequence, packetData, length));
             

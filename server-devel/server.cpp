@@ -61,6 +61,10 @@ enum PacketType : uint8_t {
     TYPE_DISCONNECT = 0x08
 };
 
+// TCP Control port for connecting to phone's TcpControlServer
+const int PHONE_TCP_CONTROL_PORT = 12347;
+const int TCP_RECONNECT_INTERVAL_MS = 3000;
+
 #pragma pack(push, 1)
 struct PacketHeader {
     uint8_t type;
@@ -167,26 +171,53 @@ const size_t MAX_JITTER_SIZE = 50;
 
 std::atomic<size_t> adaptive_jitter_threshold{5};
 
-// Simple linear resampler
+// Windowed sinc FIR resampler for high-quality sample rate conversion
+// Uses 32-tap Hamming-windowed sinc with pre-computed coefficients for performance
+static const int FIR_TAPS = 32;
+static const int HALF_TAPS = FIR_TAPS / 2;
+static const double CUTOFF_FREQ = 0.48;
+
+static double computeSincCoeff(int n, double ratio) {
+    // Cutoff must be CUTOFF_FREQ / max(ratio, 1) to prevent aliasing
+    // For downsampling (ratio > 1): cutoff = CUTOFF_FREQ / ratio
+    // For upsampling (ratio < 1):  cutoff = CUTOFF_FREQ
+    double cutoff = CUTOFF_FREQ / std::max(ratio, 1.0);
+    double x = n - HALF_TAPS;
+    double window = 0.54 - 0.46 * std::cos(2.0 * M_PI * n / (FIR_TAPS - 1));
+    
+    double sinc;
+    if (std::abs(x) < 1e-10) {
+        sinc = cutoff;
+    } else {
+        sinc = std::sin(M_PI * cutoff * x) / (M_PI * x);
+    }
+    return sinc * window / cutoff;
+}
+
 std::vector<int16_t> resample(const std::vector<int16_t>& input, unsigned int srcRate, unsigned int dstRate) {
     if (dstRate == 0 || srcRate == dstRate) return input;
 
     double ratio = (double)srcRate / dstRate;
-    size_t outputLength = (size_t)(input.size() / ratio);
+    
+    int outputLength = (int)((input.size() + HALF_TAPS) / ratio);
+    if (outputLength <= 0) return {};
+    
     std::vector<int16_t> output(outputLength);
 
-    for (size_t i = 0; i < outputLength; ++i) {
-        double position = i * ratio;
-        size_t index = (size_t)position;
-        double fraction = position - index;
+    for (int i = 0; i < outputLength; ++i) {
+        double position = (i + HALF_TAPS) * ratio - HALF_TAPS;
+        int index = (int)std::floor(position);
+        if (index < 0) index = 0;
+        if (index + FIR_TAPS > (int)input.size()) break;
 
-        if (index + 1 < input.size()) {
-            output[i] = (int16_t)((1.0 - fraction) * input[index] + fraction * input[index + 1]);
-        } else if (index < input.size()) {
-            output[i] = input[index];
-        } else {
-            output[i] = 0;
+        double sum = 0.0;
+        for (int n = 0; n < FIR_TAPS; ++n) {
+            if (index + n >= (int)input.size()) break;
+            double coeff = computeSincCoeff(n, ratio);
+            sum += input[index + n] * coeff;
         }
+        
+        output[i] = std::max(-32768, std::min(32767, (int)std::round(sum)));
     }
     return output;
 }
@@ -211,6 +242,12 @@ void set_rt_priority() {
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
         std::cerr << "Warning: Failed to set SCHED_FIFO priority. Run as root!" << std::endl;
     }
+}
+
+// Signal handler for graceful shutdown
+void signal_handler(int signum) {
+    std::cout << "\n[Main] Received signal " << signum << ". Shutting down..." << std::endl;
+    running = false;
 }
 
 void outbound_thread() {
@@ -549,6 +586,84 @@ void jitter_drain_thread() {
     }
 }
 
+void tcp_client_thread() {
+    std::cout << "[TCP Client] Thread started, connecting to phone on port " << PHONE_TCP_CONTROL_PORT << std::endl;
+    
+    while (running) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) {
+            std::cerr << "[TCP Client] Socket creation failed: " << strerror(errno) << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(TCP_RECONNECT_INTERVAL_MS));
+            continue;
+        }
+        
+        struct sockaddr_in phone_addr;
+        memset(&phone_addr, 0, sizeof(phone_addr));
+        phone_addr.sin_family = AF_INET;
+        phone_addr.sin_port = htons(PHONE_TCP_CONTROL_PORT);
+        inet_pton(AF_INET, PHONE_IP, &phone_addr.sin_addr);
+        
+        std::cout << "[TCP Client] Connecting to " << PHONE_IP << ":" << PHONE_TCP_CONTROL_PORT << std::endl;
+        
+        if (connect(sock, (struct sockaddr*)&phone_addr, sizeof(phone_addr)) < 0) {
+            std::cerr << "[TCP Client] Connect failed: " << strerror(errno) << ". Retrying in " 
+                      << TCP_RECONNECT_INTERVAL_MS << "ms..." << std::endl;
+            close(sock);
+            std::this_thread::sleep_for(std::chrono::milliseconds(TCP_RECONNECT_INTERVAL_MS));
+            continue;
+        }
+        
+        std::cout << "[TCP Client] Connected to phone TCP control server!" << std::endl;
+        
+        // Send initial sample rate negotiation
+        std::string rate_cmd = "SET_SAMPLE_RATE " + std::to_string(current_network_rate.load());
+        const char* cmd_buf = rate_cmd.c_str();
+        ssize_t sent = send(sock, cmd_buf, strlen(cmd_buf), 0);
+        if (sent > 0) {
+            std::cout << "[TCP Client] Sent: " << cmd_buf << std::endl;
+            // Read response
+            char resp[256];
+            ssize_t resp_len = recv(sock, resp, sizeof(resp) - 1, 0);
+            if (resp_len > 0) {
+                resp[resp_len] = '\0';
+                std::cout << "[TCP Client] Response: " << resp << std::endl;
+            }
+        }
+        
+        // Keep connection alive with periodic pings
+        while (running) {
+            std::string ping_cmd = "PING";
+            ssize_t sent = send(sock, ping_cmd.c_str(), ping_cmd.length(), 0);
+            if (sent < 0) {
+                std::cerr << "[TCP Client] Send failed: " << strerror(errno) << std::endl;
+                break;
+            }
+            
+            // Read response
+            char resp[256];
+            ssize_t resp_len = recv(sock, resp, sizeof(resp) - 1, 0);
+            if (resp_len < 0) {
+                std::cerr << "[TCP Client] Receive failed: " << strerror(errno) << std::endl;
+                break;
+            } else if (resp_len == 0) {
+                std::cout << "[TCP Client] Connection closed by phone." << std::endl;
+                break;
+            }
+            resp[resp_len] = '\0';
+            std::cout << "[TCP Client] Pong: " << resp << std::endl;
+            
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+        
+        close(sock);
+        std::cout << "[TCP Client] Disconnecting, will reconnect in " 
+                  << TCP_RECONNECT_INTERVAL_MS << "ms..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(TCP_RECONNECT_INTERVAL_MS));
+    }
+    
+    std::cout << "[TCP Client] Thread stopped." << std::endl;
+}
+
 void monitor_thread() {
     while (running) {
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -688,6 +803,7 @@ int main(int argc, char** argv) {
     std::thread t_in(inbound_thread);
     std::thread t_drain(jitter_drain_thread);
     std::thread t_mon(monitor_thread);
+    std::thread t_tcp(tcp_client_thread);
 
     std::cout << "Server running. Press Enter to stop." << std::endl;
     std::cin.get();
@@ -697,6 +813,7 @@ int main(int argc, char** argv) {
     t_in.join();
     t_drain.join();
     t_mon.join();
+    t_tcp.join();
 
     if (capture_started) ma_device_uninit(&captureDevice);
     if (playback_started) ma_device_uninit(&playbackDevice);

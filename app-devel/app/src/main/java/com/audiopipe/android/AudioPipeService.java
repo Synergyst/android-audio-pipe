@@ -112,7 +112,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
 
         Log.i(TAG, "Starting Audio Pipe Service for target: " + serverIp + ":" + serverPort + " [Mode: " + routingMode + ", AEC/NR: " + useAecNr + ", NetRate: " + currentNetworkSampleRate + "Hz]");
         
-        startForegroundService();
+        startForegroundSetup();
         
         new Thread(() -> {
             try {
@@ -141,6 +141,11 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 captureEngine.start();
                 
                 Log.i(TAG, "Service operational. Waiting for handshake response...");
+                
+                // Start the connection monitor AFTER all components are initialized
+                // to prevent race condition where monitor sends handshakes before
+                // udpReceiver is ready to listen.
+                startConnectionMonitor();
             } catch (IOException e) {
                 Log.e(TAG, "Failed to start audio pipe: " + e.getMessage());
                 updateState(ServiceState.DISCONNECTED);
@@ -201,8 +206,11 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
             if (redundantData != null) {
                 int redLen = AudioResampler.resample(redundantData, 0, redundantData.length, playbackRedundantShortBuffer, playbackRedundantBuffer, currentNetworkSampleRate, AudioConfig.SAMPLE_RATE);
                 
-                // Use BufferPool instead of allocating new byte array
-                resampledRedundant = bufferPool.lease();
+                // Must allocate a new buffer here: the resampled redundant data
+                // can be up to MAX_BUF_SIZE bytes, far larger than the 512-byte
+                // BufferPool buffers.  PlaybackEngine needs to hold it until
+                // playback consumes it.
+                resampledRedundant = new byte[redLen];
                 System.arraycopy(playbackRedundantBuffer, 0, resampledRedundant, 0, redLen);
             }
             
@@ -213,6 +221,11 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
             bufferPool.release(data);
             if (redundantData != null) {
                 bufferPool.release(redundantData);
+            }
+            
+            // Release the resampled redundant buffer back to the pool to prevent leak
+            if (resampledRedundant != null) {
+                bufferPool.release(resampledRedundant);
             }
         }
     }
@@ -270,7 +283,7 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         return sb.toString();
     }
 
-    private void startForegroundService() {
+    private void startForegroundSetup() {
         String channelId = "audio_pipe_channel";
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
@@ -284,7 +297,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         }
 
         updateNotification();
-        
+    }
+
+    private void startConnectionMonitor() {
         new Thread(() -> {
             while (true) {
                 try {

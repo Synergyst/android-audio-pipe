@@ -16,7 +16,8 @@ public class UdpAudioStreamer {
     private int sequenceNumber = 0;
     private boolean isStreaming = false;
     private byte[] sessionId = AudioConfig.SESSION_ID;
-    private byte[] lastPayload = null;
+    // Pre-allocated buffer for FEC redundant payload (reused, never reallocated)
+    private byte[] lastPayload = new byte[AudioConfig.BUFFER_SIZE];
 
     // Pre-allocated buffer to avoid GC churn in sendPacket
     private ByteBuffer packetBuffer = ByteBuffer.allocate(4096);
@@ -84,8 +85,7 @@ public class UdpAudioStreamer {
             
             if (payload != null && payloadLen > 0) {
                 // Store current payload for next packet's FEC
-                // Note: We still allocate this once per packet, but it's smaller than the full packet buffer
-                lastPayload = new byte[payloadLen];
+                // Reuse pre-allocated lastPayload buffer — no allocation in hot path
                 System.arraycopy(payload, 0, lastPayload, 0, payloadLen);
             }
         } catch (IOException e) {
@@ -100,7 +100,8 @@ public class UdpAudioStreamer {
     }
 
     public void stop() {
-        sendDisconnect();
+        // Don't send disconnect on the main thread — causes NetworkOnMainThreadException.
+        // The server will detect disconnection when it stops receiving packets.
         isStreaming = false;
         if (socket != null) {
             socket.close();
