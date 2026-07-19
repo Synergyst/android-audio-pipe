@@ -36,8 +36,9 @@ public class BufferPool {
         if (buffer == null || buffer == emergencyBuffer) return;
         if (buffer.length == bufferSize) {
             pool.offer(buffer);
+        } else {
+            Log.w(TAG, "Dropping non-matching buffer (len=" + buffer.length + " vs expected " + bufferSize + "). This is likely a bug.");
         }
-        // Any other non-matching buffers (shouldn't happen) are silently dropped.
     }
 
     public int getBufferSize() {

@@ -7,7 +7,9 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.util.Log;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -134,11 +136,14 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 controlServer.start();
                 
                 updateState(ServiceState.CONNECTING);
-                udpReceiver.sendHandshake(serverIp, serverPort);
-                lastHandshakeSent = System.currentTimeMillis();
                 
                 captureEngine = new AudioCaptureEngine(this, useAecNr);
                 captureEngine.start();
+                
+                // Send handshake after capture starts so the first few audio
+                // frames aren't discarded due to CONNECTING state.
+                udpReceiver.sendHandshake(serverIp, serverPort);
+                lastHandshakeSent = System.currentTimeMillis();
                 
                 Log.i(TAG, "Service operational. Waiting for handshake response...");
                 
@@ -175,11 +180,14 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (this.currentState != newState) {
             Log.i(TAG, "State transition: " + currentState + " -> " + newState);
             this.currentState = newState;
-            updateNotification();
-            
-            Intent intent = new Intent("com.audiopipe.android.STATE_CHANGED");
-            intent.putExtra("state", newState.name());
-            sendBroadcast(intent);
+            // Run on main thread — Samsung One UI can crash/ANR when foreground
+            // notifications or broadcasts are updated from background threads.
+            new Handler(Looper.getMainLooper()).post(() -> {
+                updateNotification();
+                Intent intent = new Intent("com.audiopipe.android.STATE_CHANGED");
+                intent.putExtra("state", newState.name());
+                sendBroadcast(intent);
+            });
         }
     }
 
@@ -223,10 +231,10 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
                 bufferPool.release(redundantData);
             }
             
-            // Release the resampled redundant buffer back to the pool to prevent leak
-            if (resampledRedundant != null) {
-                bufferPool.release(resampledRedundant);
-            }
+            // resampledRedundant was allocated with new byte[], NOT from the pool,
+            // so it should NOT be released back to the pool (it would silently be
+            // dropped since its size rarely matches the expected 512 bytes).
+            // Let it be garbage collected normally.
         }
     }
 

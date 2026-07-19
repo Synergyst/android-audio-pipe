@@ -54,8 +54,11 @@ public class AudioPlaybackEngine implements Runnable {
     }
 
     public void updateSampleRate(int newRate) {
-        // Hardware remains at 44.1kHz; resampling is handled in the Service
-        Log.i(TAG, "Sample rate preference updated to " + newRate + "Hz (Network rate). Hardware remains at " + hardwareSampleRate + "Hz");
+        // AudioTrack is initialized at the hardware rate (44.1kHz). Resampling
+        // is handled in AudioPipeService.onAudioDataReceived() so no need to
+        // re-create the track. This method exists as a no-op so callers don't
+        // get null-pointer surprises.
+        Log.i(TAG, "Sample rate updated to " + newRate + "Hz (network rate). Resampling handles conversion.");
     }
 
     private void startWithRate(int rate) {
