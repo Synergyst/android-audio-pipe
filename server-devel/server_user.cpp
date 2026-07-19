@@ -929,6 +929,10 @@ static void* tcp_client_thread_func(void* arg) {
             char resp[256];
             ssize_t resp_len = recv(sock, resp, sizeof(resp) - 1, 0);
             if (resp_len < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // Timeout — check running flag and loop back quickly
+                    continue;
+                }
                 std::cerr << "[TCP Client] Receive failed: " << strerror(errno) << std::endl;
                 break;
             } else if (resp_len == 0) {
@@ -941,6 +945,7 @@ static void* tcp_client_thread_func(void* arg) {
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
 
+        g_tcp_sock.store(-1);  // Release socket fd before closing
         close(sock);
         std::cout << "[TCP Client] Disconnecting, will reconnect in "
                   << TCP_RECONNECT_INTERVAL_MS << "ms..." << std::endl;
