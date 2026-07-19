@@ -6,7 +6,6 @@
 //
 // No bash script needed — just run the binary directly.
 
-#define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 
 #include <iostream>
@@ -25,6 +24,7 @@
 #include <pwd.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <csignal>
 #include <iomanip>
 #include <chrono>
@@ -185,6 +185,7 @@ std::atomic<bool> running(true);
 std::atomic<bool> null_mode(false);
 std::atomic<bool> test_tone_mode(false);
 ConnectionStats stats;
+std::atomic<int> g_tcp_sock{-1};  // TCP client socket fd — used by main() to unblock shutdown
 uint8_t CURRENT_SESSION[3] = {0x00, 0x00, 0x00};
 std::mutex session_mtx;
 
@@ -891,6 +892,16 @@ static void* tcp_client_thread_func(void* arg) {
 
         std::cout << "[TCP Client] Connected to phone TCP control server!" << std::endl;
 
+        // Set a short receive timeout so recv() unblocks quickly on shutdown
+        struct timeval tv_tcp;
+        tv_tcp.tv_sec = 0;
+        tv_tcp.tv_usec = 100000;  // 100ms timeout
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv_tcp, sizeof(tv_tcp));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv_tcp, sizeof(tv_tcp));
+
+        // Track socket fd so main() can close it to unblock any pending recv()
+        g_tcp_sock.store(sock);
+
         // Send initial sample rate negotiation
         std::string rate_cmd = "SET_SAMPLE_RATE " + std::to_string(current_network_rate.load());
         const char* cmd_buf = rate_cmd.c_str();
@@ -902,6 +913,8 @@ static void* tcp_client_thread_func(void* arg) {
             if (resp_len > 0) {
                 resp[resp_len] = '\0';
                 std::cout << "[TCP Client] Response: " << resp << std::endl;
+            } else if (resp_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                std::cerr << "[TCP Client] Initial receive failed: " << strerror(errno) << std::endl;
             }
         }
 
@@ -1110,6 +1123,13 @@ int main(int argc, char** argv) {
 
     // Signal threads to stop
     running = false;
+
+    // Unblock TCP client thread if it's stuck in recv()
+    int tcp_fd = g_tcp_sock.exchange(-1);
+    if (tcp_fd >= 0) {
+        std::cout << "[System] Closing TCP client socket to unblock shutdown..." << std::endl;
+        close(tcp_fd);
+    }
 
     // Wait for all threads to finish
     pthread_join(t_out, NULL);
