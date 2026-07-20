@@ -225,11 +225,15 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
             // PlaybackEngine.playAudio must handle the length of the buffer
             playbackEngine.playAudio(sequence, playbackResampleBuffer, actualLen, resampledRedundant);
             
-            // Release original buffers back to pool
-            bufferPool.release(data);
-            if (redundantData != null) {
-                bufferPool.release(redundantData);
-            }
+            // BUG #2 FIX: data and redundantData were allocated with new byte[] in
+            // UdpAudioReceiver (not from the pool). Do NOT release them back to the pool.
+            // Releasing non-pool buffers pollutes the pool with stale audio data that
+            // will be played or re-sent later, corrupting the audio stream.
+            // Let them be garbage collected normally.
+            // bufferPool.release(data);  // REMOVED
+            // if (redundantData != null) {
+            //     bufferPool.release(redundantData);  // REMOVED
+            // }
             
             // resampledRedundant was allocated with new byte[], NOT from the pool,
             // so it should NOT be released back to the pool (it would silently be
@@ -245,6 +249,9 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
         if (type == AudioConfig.TYPE_AUDIO) {
             lastPacketSeen = System.currentTimeMillis();
         }
+        // Note: PONG intentionally does NOT update lastPacketSeen, because the
+        // server could respond to pings while the audio path is broken. We only
+        // consider audio packets as proof of a live connection.
         
         if (type == AudioConfig.TYPE_HANDSHAKE_RESP) {
             Log.i(TAG, "Handshake response received! Connection established.");

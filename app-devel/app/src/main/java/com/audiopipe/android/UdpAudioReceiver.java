@@ -36,9 +36,13 @@ public class UdpAudioReceiver implements Runnable {
 
     public void start() throws IOException {
         this.socket = new DatagramSocket(port);
+        // BUG #8 FIX: Increase receive buffer to handle burst audio packets.
+        // Default OS buffers (often 64KB or less) are too small for high-rate
+        // audio streaming, causing silent UDP drops. 256KB reduces packet loss.
+        this.socket.setReceiveBufferSize(262144); // 256KB
         this.isListening = true;
         new Thread(this, "UdpListenerThread").start();
-        Log.i(TAG, "UDP Receiver started on port " + port);
+        Log.i(TAG, "UDP Receiver started on port " + port + " (RCVBUF=256KB)");
     }
 
     public void sendHandshake(String ip, int port) {

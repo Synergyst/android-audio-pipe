@@ -896,12 +896,19 @@ static void* jitter_drain_thread_func(void* arg) {
                 size_t current_threshold = adaptive_jitter_threshold.load();
 
                 if (jitterBuffer.size() > DRIFT_THRESHOLD) {
+                    // Only increase threshold on OVERFLOW to prevent stale packets.
+                    // During underflow (common at startup), lowering the threshold
+                    // is correct — we want to play packets ASAP to minimize latency.
+                    // BUG #3 FIX: Removed threshold increase on underflow (< 2 packets).
+                    // Increasing threshold when buffer is low causes initial latency
+                    // spikes because the server holds packets longer than necessary.
                     while (jitterBuffer.size() > current_threshold) jitterBuffer.pop();
                     if (!jitterBuffer.empty()) nextExpectedSeq = jitterBuffer.top().sequence;
                     if (current_threshold < JITTER_THRESHOLD_MAX) adaptive_jitter_threshold++;
-                } else if (jitterBuffer.size() < 2) {
-                    if (current_threshold < JITTER_THRESHOLD_MAX) adaptive_jitter_threshold++;
                 }
+                // Removed: else if (jitterBuffer.size() < 2) {
+                //     if (current_threshold < JITTER_THRESHOLD_MAX) adaptive_jitter_threshold++;
+                // }
             }
         }
 
@@ -1215,11 +1222,25 @@ int main(int argc, char** argv) {
     
     if (poll_ret > 0) {
         if (pfd[1].revents & POLLIN) {
-            // Signal was received — read ONE byte to clear the pipe
-            char buf[1];
-            if (signal_pipe[0] >= 0) {
-                read(signal_pipe[0], buf, 1);
+            // Signal or IPC message was received — drain ALL bytes from the pipe.
+            // Signal handler writes the signal number (2, 3, or 15) which are
+            // non-printable. IPC set_phone_ip() writes "I" (0x49).
+            // We only exit on real signals, not on IPC messages.
+            char buf[64];
+            ssize_t n;
+            bool got_signal = false;
+            while ((n = read(signal_pipe[0], buf, sizeof(buf))) > 0) {
+                for (ssize_t i = 0; i < n; i++) {
+                    if (buf[i] == SIGINT || buf[i] == SIGTERM || buf[i] == SIGQUIT) {
+                        got_signal = true;
+                    }
+                }
             }
+            if (got_signal) {
+                std::cout << "\n[System] Signal received. Shutting down..." << std::endl;
+            }
+            // If got_signal is false, this was just an IPC "I" from set_phone_ip();
+            // don't exit — just continue polling.
         }
         if (pfd[0].revents & POLLIN) {
             // Enter was pressed — read ONE byte to clear stdin

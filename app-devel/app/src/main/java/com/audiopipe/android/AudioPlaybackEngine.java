@@ -201,10 +201,23 @@ public class AudioPlaybackEngine implements Runnable {
                         // Ensure track is playing — Android may silently stop playback after idle/silence periods.
                         // Calling play() on an already-playing track is a safe no-op.
                         audioTrack.play();
-                        audioTrack.write(dataToPlay, 0, lengthToPlay);
+
+                        // BUG #1 FIX: Check write() return value.
+                        // On Android, write() can return ERROR_INVALID_OPERATION (-1) if the track isn't ready,
+                        // or a short write if the buffer is full. Ignoring this silently drops audio.
+                        int written = audioTrack.write(dataToPlay, 0, lengthToPlay);
+                        if (written < 0) {
+                            Log.e(TAG, "AudioTrack.write failed with error: " + written
+                                + ". Track may need reset.");
+                        } else if (written < lengthToPlay) {
+                            Log.w(TAG, "AudioTrack.write short write: " + written
+                                + "/" + lengthToPlay + " bytes");
+                        }
                     }
-                    // Release buffer back to pool after playback
-                    bufferPool.release(dataToPlay);
+                    // BUG #2 FIX: dataToPlay was allocated with new byte[] in playAudio(),
+                    // NOT from the pool. Do NOT release it back to the pool — that pollutes
+                    // the pool with stale audio data that will be played or re-sent later.
+                    // Let it be garbage collected normally.
                 } else {
                     synchronized (bufferLock) {
                         if (packetBuffer.isEmpty()) {
