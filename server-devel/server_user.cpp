@@ -1213,43 +1213,45 @@ int main(int argc, char** argv) {
     pfd[1].fd = signal_pipe[0];
     pfd[1].events = POLLIN;
 
-    // Block until Enter is pressed or a signal arrives
-    // Retry if poll() is interrupted by a signal (EINTR)
-    int poll_ret;
-    do {
-        poll_ret = poll(pfd, 2, -1);
-    } while (poll_ret < 0 && errno == EINTR);
-    
-    if (poll_ret > 0) {
-        if (pfd[1].revents & POLLIN) {
-            // Signal or IPC message was received — drain ALL bytes from the pipe.
-            // Signal handler writes the signal number (2, 3, or 15) which are
-            // non-printable. IPC set_phone_ip() writes "I" (0x49).
-            // We only exit on real signals, not on IPC messages.
-            char buf[64];
-            ssize_t n;
-            bool got_signal = false;
-            while ((n = read(signal_pipe[0], buf, sizeof(buf))) > 0) {
-                for (ssize_t i = 0; i < n; i++) {
-                    if (buf[i] == SIGINT || buf[i] == SIGTERM || buf[i] == SIGQUIT) {
-                        got_signal = true;
-                    }
+    // Poll loop: keep waiting until Enter is pressed, a real signal arrives,
+    // or running is set to false (by the signal handler).
+    // IPC messages ("I" from set_phone_ip) wake poll() but should NOT cause shutdown.
+    // We use a 1-second timeout on poll() so the main loop can check running.
+    bool shutting_down = false;
+    while (!shutting_down) {
+        int poll_ret;
+        do {
+            poll_ret = poll(pfd, 2, 1000); // 1s timeout to check running flag
+        } while (poll_ret < 0 && errno == EINTR);
+        
+        // Always check running flag — signal handler sets it to false
+        if (!running.load()) {
+            std::cout << "\n[System] Signal received. Shutting down..." << std::endl;
+            shutting_down = true;
+            break;
+        }
+        
+        if (poll_ret > 0) {
+            if (pfd[1].revents & POLLIN) {
+                // Signal or IPC message was received — drain ALL bytes from the pipe.
+                // Signal handler writes the signal number (2, 3, or 15).
+                // IPC set_phone_ip() writes "I" (0x49).
+                char buf[64];
+                ssize_t n;
+                while ((n = read(signal_pipe[0], buf, sizeof(buf))) > 0) {
+                    // Drain the pipe but don't act on IPC messages.
+                    // The running flag check above handles signal-based shutdown.
                 }
             }
-            if (got_signal) {
-                std::cout << "\n[System] Signal received. Shutting down..." << std::endl;
+            if (pfd[0].revents & POLLIN) {
+                // Enter was pressed — shut down
+                char buf[1];
+                int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+                fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+                read(STDIN_FILENO, buf, 1);
+                fcntl(STDIN_FILENO, F_SETFL, flags);
+                shutting_down = true;
             }
-            // If got_signal is false, this was just an IPC "I" from set_phone_ip();
-            // don't exit — just continue polling.
-        }
-        if (pfd[0].revents & POLLIN) {
-            // Enter was pressed — read ONE byte to clear stdin
-            char buf[1];
-            // Set stdin to non-blocking temporarily
-            int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-            fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
-            read(STDIN_FILENO, buf, 1);
-            fcntl(STDIN_FILENO, F_SETFL, flags);
         }
     }
 
