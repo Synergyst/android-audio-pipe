@@ -44,8 +44,8 @@ public class AudioPipeService extends Service implements AudioCaptureEngine.Audi
     private boolean useAecNr = false;
     private int currentNetworkSampleRate = AudioConfig.SAMPLE_RATE;
 
-    private ServiceState currentState = ServiceState.DISCONNECTED;
-    private long lastPacketSeen = 0;
+    private volatile ServiceState currentState = ServiceState.DISCONNECTED;
+    private volatile long lastPacketSeen = 0;
     private long lastHandshakeSent = 0;
     private static final long HANDSHAKE_RETRY_INTERVAL = 2000; // 2 seconds
     private static final long CONNECTION_TIMEOUT_MS = 5000; // 5 seconds
