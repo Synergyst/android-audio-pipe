@@ -37,6 +37,7 @@
 #include <numeric>
 #include <mutex>
 #include <cmath>
+#include <ctime>
 #include <random>
 #include <cstdlib>
 #include <queue>
@@ -428,12 +429,16 @@ static std::vector<int16_t> resample(const std::vector<int16_t>& input, unsigned
 // ── miniaudio callbacks ────────────────────────────────────────────────────
 
 void data_capture_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    if (null_mode) return;
+    if (null_mode || !running.load()) return;
     const int16_t* input = (const int16_t*)pInput;
     captureBuffer.write(input, frameCount * CHANNELS);
 }
 
 void playback_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    if (!running.load()) {
+        memset(pOutput, 0, frameCount * CHANNELS * sizeof(int16_t));
+        return;
+    }
     int16_t* output = (int16_t*)pOutput;
     size_t read = playbackBuffer.read(output, frameCount * CHANNELS);
     if (read < frameCount * CHANNELS) {
@@ -1104,10 +1109,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Signal handling
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGQUIT, signal_handler);
+    // Signal handling — use sigaction() without SA_RESTART so signals interrupt
+    // blocking system calls (poll, recvfrom, etc.), allowing fast detection of
+    // Ctrl+C/Enter for clean shutdown.
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // No SA_RESTART — signals interrupt blocking calls
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGQUIT, &sa, nullptr);
 
     // Set up self-pipe for signal interruption (MUST be called before poll)
     setup_signal_pipe();
@@ -1265,18 +1277,67 @@ int main(int argc, char** argv) {
         close(tcp_fd);
     }
 
-    // Wait for all threads to finish
-    pthread_join(t_out, NULL);
-    pthread_join(t_in, NULL);
-    pthread_join(t_drain, NULL);
-    pthread_join(t_mon, NULL);
-    pthread_join(t_tcp, NULL);
+    // Join all threads with timeouts to prevent indefinite blocking.
+    // pthread_timedjoin_np ensures we never hang if a thread fails to exit.
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 3;  // 3s for outbound (sleep_until may take up to one interval)
 
-    // Uninitialize audio devices
-    if (capture_started) ma_device_uninit(&captureDevice);
-    if (playback_started) ma_device_uninit(&playbackDevice);
+    std::cout << "[System] Waiting for threads to stop..." << std::endl;
 
-    // Clean up PulseAudio virtual modules
+    int joinRet;
+    if ((joinRet = pthread_timedjoin_np(t_out, NULL, &timeout)) != 0)
+        std::cerr << "[System] WARNING: outbound thread join failed: " << joinRet << std::endl;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 2;  // 2s for inbound (recvfrom has 500ms timeout)
+    if ((joinRet = pthread_timedjoin_np(t_in, NULL, &timeout)) != 0)
+        std::cerr << "[System] WARNING: inbound thread join failed: " << joinRet << std::endl;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 2;  // 2s for jitter drain
+    if ((joinRet = pthread_timedjoin_np(t_drain, NULL, &timeout)) != 0)
+        std::cerr << "[System] WARNING: jitter drain thread join failed: " << joinRet << std::endl;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 2;  // 2s for monitor
+    if ((joinRet = pthread_timedjoin_np(t_mon, NULL, &timeout)) != 0)
+        std::cerr << "[System] WARNING: monitor thread join failed: " << joinRet << std::endl;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 2;  // 2s for TCP client (already stopped, but just in case)
+    if ((joinRet = pthread_timedjoin_np(t_tcp, NULL, &timeout)) != 0)
+        std::cerr << "[System] WARNING: TCP client thread join failed: " << joinRet << std::endl;
+
+    std::cout << "[System] All threads stopped." << std::endl;
+
+    // Set up a 10-second shutdown timeout for ma_device_uninit() so we never
+    // hang indefinitely if PulseAudio or miniaudio gets stuck.
+    struct sigaction sa_alarm;
+    memset(&sa_alarm, 0, sizeof(sa_alarm));
+    sa_alarm.sa_handler = [](int) {
+        std::cerr << "[System] Shutdown timeout! Forcing exit." << std::endl;
+        _exit(1);
+    };
+    sigemptyset(&sa_alarm.sa_mask);
+    sa_alarm.sa_flags = 0;
+    sigaction(SIGALRM, &sa_alarm, nullptr);
+    alarm(10);
+
+    // Stop audio devices BEFORE uninit — this tells PulseAudio to stop streaming
+    // and allows the miniaudio internal audio thread to exit its loop cleanly.
+    if (capture_started) {
+        std::cout << "[System] Stopping capture device..." << std::endl;
+        ma_device_stop(&captureDevice);
+        ma_device_uninit(&captureDevice);
+    }
+    if (playback_started) {
+        std::cout << "[System] Stopping playback device..." << std::endl;
+        ma_device_stop(&playbackDevice);
+        ma_device_uninit(&playbackDevice);
+    }
+
+    // Cancel the alarm — shutdown completed successfully
+    alarm(0);
+    sigaction(SIGALRM, nullptr, nullptr);
+
+    // Clean up PulseAudio virtual modules (removes null sinks/sources)
     cleanup_pulse_modules();
 
     // Close the signal pipe
